@@ -1,0 +1,23 @@
+Create our system variables
+
+```
+TPU_NAME=sholto-v2-32
+ZONE=us-central1-a
+PROJECT=jax-dev
+```
+
+Create the pod slice
+```
+gcloud compute tpus tpu-vm create $TPU_NAME   --zone $ZONE   --project $PROJECT --accelerator-type v2-32   --version tpu-vm-base
+```
+
+To interact with the pod slice, we need to run a python file in parallel on all of them + do assorted config. 
+
+A simple but manual process is described [here](https://cloud.google.com/tpu/docs/jax-pods). 
+
+We're expecting to have a more interactive dev process, so we'll trade off a little setup for a quicker repeated workflow. We'll run a script that sets up a tmux pane, split by the number of hosts in the slice. TODO: explain
+
+
+```
+python3 workflow_setup/infra.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT
+```

@@ -37,4 +37,12 @@ Now, we should have two terminals.
 
 NOTE: If you want to turn off broadcasting to work in only one window, type ctrl-b then : to open a prompt. Then type 'setw synchronize-panes'. This toggles it on and off. 
 
+These next steps we are doing outside a setup script for the moment - TODO: wrap them up. 
+In your local terminal
+
+```
+ssh-keygen -t rsa -f ~/.ssh/pod_key -N '' -C 'my_tpu_pod'
+gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/authorized_keys/pod_key.pub --worker=all --zone=$ZONE
+
+```
 In your remote terminal

@@ -40,7 +40,7 @@ NOTE: If you want to turn off broadcasting to work in only one window, type ctrl
 These next steps we are doing outside a setup script for the moment - TODO: wrap them up. 
 In your local terminal
 
-```python
+```ruby
 ssh-keygen -t rsa -f ~/.ssh/pod_key -N '' -C 'my_tpu_pod'
 # give all workers the public key so we can copy it to authorised hosts
 gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/pod_key.pub --worker=all --zone=$ZONE

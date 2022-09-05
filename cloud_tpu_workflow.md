@@ -19,9 +19,9 @@ To interact with the pod slice, we need to run a python file in parallel on all 
 
 A simple but manual process is described [here](https://cloud.google.com/tpu/docs/jax-pods). 
 
-We're expecting to have a more interactive dev process, so we'll trade off a little setup for a quicker repeated workflow. We'll run a script that sets up a tmux pane, for each host in the slice - and sets up terminal broadcasting so that typing in any pane will be copied to the others. 
+We're expecting to have a more interactive dev process, so we'll trade off a little setup for a quicker repeated workflow. We'll run a script that sets up a tmux pane, for each host in the slice - and sets up terminal broadcasting so that typing in any pane will be copied to the others. In the background, it'll also setup fswatch + rsync so that files are synced from the host to the others every 3 seconds.
 
-If you have never used scp before
+If you have never used scp with gcp before, you should do this
 
 ```ruby
 ssh-add ~/.ssh/google_compute_engine

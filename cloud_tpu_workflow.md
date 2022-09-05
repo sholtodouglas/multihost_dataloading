@@ -42,7 +42,14 @@ In your local terminal
 
 ```
 ssh-keygen -t rsa -f ~/.ssh/pod_key -N '' -C 'my_tpu_pod'
-gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/authorized_keys/pod_key.pub --worker=all --zone=$ZONE
+# give all workers the public key so we can copy it to authorised hosts
+gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/pod_key.pub --worker=all --zone=$ZONE
+# give worker 0 the private key
+gcloud compute tpus tpu-vm scp ~/.ssh/pod_key $TPU_NAME:.ssh/pod_key --worker=0 --zone=$ZONE
 
 ```
 In your remote terminal
+
+```
+cat .ssh/pod_key.pub >> .ssh/authorized_keys
+```

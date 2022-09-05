@@ -36,7 +36,7 @@ tmux new-session -s pod_control_pane
 ### Back to the original terminal window
 ```ruby
 # From your original terminal window, run this python script which will connect to the tmux session, create a window for every host in the TPU slice, setup terminal broadcasting. 
-python3 workflow_setup/infra.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT
+python3 workflow_setup/setup_hosts.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT
 ```
  
 Now, we should have two terminals. 

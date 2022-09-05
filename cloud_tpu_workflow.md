@@ -30,4 +30,6 @@ Now, we should have two terminals.
 - Local: The terminal one your local machine you just ran workflow_setup/infra.py from
 - Remote: A tmux terminal connected to every host, with terminal broadcasting.
 
+NOTE: If you want to turn off broadcasting to work in only one window, type ctrl-b then : to open a prompt. Then type 'setw synchronize-panes'. This toggles it on and off. 
+
 In your remote terminal

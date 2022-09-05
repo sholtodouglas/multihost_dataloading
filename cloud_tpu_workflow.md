@@ -41,12 +41,30 @@ python3 workflow_setup/setup_hosts.py --tpu_name=$TPU_NAME --zone=$ZONE --projec
  
 Now, we should have two terminals. 
 - Local: The terminal one your local machine you just ran workflow_setup/infra.py from
-- Remote: A tmux terminal connected to every host, with terminal broadcasting.
+- Remote: A tmux terminal connected to every host, with terminal broadcasting. In the background (on window 1) should be a process running fswatch, syncing anything you do on host 1 with all the others.
 
 > **Note**
 > If you want to turn off broadcasting to work in only one window, type ctrl-b then : to open a prompt. Then type 'setw synchronize-panes'. This toggles it on and off. 
 
 > **Note**
-> If you wanted, you could now go to the tmux terminal of any of the machines, turn off broadcasting and then ssh into any other machine using 'ssh -i ~/.ssh/pod_key.pub INSERT_INTERNAL_IP_HERE', where the internal ip addresses were printed earlier by our script (or you can look them up in gcp). This is what we will use to automatically synchronize files from host 0 to the others.
+> If you wanted, you could now go to the tmux terminal of any of the machines, turn off broadcasting and then ssh into any other machine using 'ssh -i ~/.ssh/pod_key INSERT_INTERNAL_IP_HERE', where the internal ip addresses were printed earlier by our script (or you can look them up in gcp). This is what we will use to automatically synchronize files from host 0 to the others.
 
 
+
+-------------------------------------------------------------
+### Example fswatch
+WATCH="working_dir/"
+fswatch --one-per-batch --recursive --latency 1 --verbose $WATCH | xargs -I{} rsync -a -e "ssh -i ~/.ssh/pod_key" $WATCH 10.128.0.120:$WATCH& rsync -a -e "ssh -i ~/.ssh/pod_key" $WATCH 10.128.0.123:$WATCH& rsync -a -e "ssh -i ~/.ssh/pod_key" $WATCH 10.128.0.122:$WATCH
+
+fswatch --one-per-batch --recursive --latency 1 --verbose working_dir/ | xargs -I{} rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.120:working_dir/& rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.123:working_dir/& rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.122:working_dir/
+
+fswatch --one-per-batch --recursive --latency 1 --verbose working_dir/ | xargs -I{} rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.120:working_dir/& rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.123:working_dir/& rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ 10.128.0.122:working_dir/
+
+fswatch --one-per-batch --recursive --latency 1 --verbose working_dir/ | xargs -I{} for d in {10.128.0.120:working_dir 10.128.0.123:working_dir 10.128.0.122:working_dir}; do rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir/ $d; done
+
+
+fswatch --one-per-batch --recursive --latency 1 --verbose working_dir | xargs -I{} rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir 10.128.0.120:working_dir; rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir 10.128.0.123:working_dir; rsync -a -e 'ssh -i ~/.ssh/pod_key' working_dir 10.128.0.122:working_dir
+
+fswatch --one-per-batch --recursive --latency 1 --verbose $WATCH | xargs -I{} rsync -a -e "ssh -i ~/.ssh/pod_key" $WATCH 10.128.0.123:$WATCH; 
+
+fswatch --one-per-batch --recursive --latency 3 --verbose working_dir/ | xargs -I{} ./sync.sh

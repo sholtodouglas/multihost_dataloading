@@ -19,5 +19,9 @@ We're expecting to have a more interactive dev process, so we'll trade off a lit
 
 
 ```
+# Go to a new terminal window, and create this tmux session
+tmux new-session -d -s pod_control_pane
+
+# From your original terminal window, run this python script which will connect to the tmux session, create a window for every host in the TPU slice, and do our setup
 python3 workflow_setup/infra.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT
 ```

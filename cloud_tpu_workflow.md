@@ -17,6 +17,11 @@ A simple but manual process is described [here](https://cloud.google.com/tpu/doc
 
 We're expecting to have a more interactive dev process, so we'll trade off a little setup for a quicker repeated workflow. We'll run a script that sets up a tmux pane, for each host in the slice - and sets up terminal broadcasting so that typing in any pane will be copied to the others. 
 
+If you have never used scp before
+
+```
+ssh-add ~/.ssh/google_compute_engine
+```
 
 ```
 # Go to a new terminal window, and create this tmux session

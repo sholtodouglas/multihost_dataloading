@@ -1,6 +1,10 @@
+We'll be working with two terminal windows here - one locally for setup, and one connected to our host TPUs in the slice.
+
+### On your first terminal window
+
 Create our system variables
 
-```ruby
+```javascript
 TPU_NAME=sholto-v2-32
 ZONE=us-central1-a
 PROJECT=jax-dev
@@ -23,10 +27,14 @@ If you have never used scp before
 ssh-add ~/.ssh/google_compute_engine
 ```
 
-```bash
+### Go to a new terminal window to create the tmux session we'll be using for remote access
+```yaml
 # Go to a new terminal window, and create this tmux session
 tmux new-session -s pod_control_pane
+```
 
+### Back to the original terminal window
+```ruby
 # From your original terminal window, run this python script which will connect to the tmux session, create a window for every host in the TPU slice, setup terminal broadcasting. 
 python3 workflow_setup/infra.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT
 ```
@@ -37,25 +45,6 @@ Now, we should have two terminals.
 
 NOTE: If you want to turn off broadcasting to work in only one window, type ctrl-b then : to open a prompt. Then type 'setw synchronize-panes'. This toggles it on and off. 
 
-These next steps we are doing outside a setup script for the moment - TODO: wrap them up. 
-In your local terminal
-
-```ruby
-ssh-keygen -t rsa -f ~/.ssh/pod_key -N '' -C 'my_tpu_pod'
-# give all workers the public key so we can copy it to authorised hosts
-gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/pod_key.pub --worker=all --zone=$ZONE
-# give all workers the private key - we could only give worker 0: TODO: Check security implications
-# this allows any machine to ssh to any other machine
-gcloud compute tpus tpu-vm scp ~/.ssh/pod_key $TPU_NAME:.ssh/pod_key --worker=all --zone=$ZONE
-
-```
-In your remote terminal
-
-```yaml
-# include the pubkey in authorised keys
-cat .ssh/pod_key.pub >> .ssh/authorized_keys
-chmod 600 ~/.ssh/pod_key
-
-```
-
 If you wanted, you could now go to the tmux terminal of any of the machines, turn off broadcasting and then ssh into any other machine using 'ssh -i ~/.ssh/pod_key.pub INSERT_INTERNAL_IP_HERE', where the internal ip addresses were printed earlier by our script (or you can look them up in gcp). This is what we will use to automatically synchronize files from host 0 to the others.
+
+

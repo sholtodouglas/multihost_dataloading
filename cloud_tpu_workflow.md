@@ -56,3 +56,6 @@ Now you can edit code anyway you like!
 Personally, I like to use vs-code remote to jump directly into host 0 and make edits there. Then, when you want to run a file take advantage of the terminal broadcasting to simply run it across all panes in tmux as though you had one terminal. Any changes you make will be reflected in the background by fswatch + rsync.
 
 Other options I've heard that work well are emacs on host 0, using terminal broadcasting!
+
+> **Warning**
+> Anything in 'working_dir' will be replicated across tpus - so aim not to store weights or data in there. 

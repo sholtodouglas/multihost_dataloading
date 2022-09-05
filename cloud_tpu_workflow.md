@@ -1,13 +1,13 @@
 Create our system variables
 
-```
+```ruby
 TPU_NAME=sholto-v2-32
 ZONE=us-central1-a
 PROJECT=jax-dev
 ```
 
 Create the pod slice
-```
+```ruby
 gcloud compute tpus tpu-vm create $TPU_NAME   --zone $ZONE   --project $PROJECT --accelerator-type v2-32   --version tpu-vm-base
 ```
 
@@ -19,11 +19,11 @@ We're expecting to have a more interactive dev process, so we'll trade off a lit
 
 If you have never used scp before
 
-```
+```ruby
 ssh-add ~/.ssh/google_compute_engine
 ```
 
-```
+```bash
 # Go to a new terminal window, and create this tmux session
 tmux new-session -s pod_control_pane
 
@@ -40,7 +40,7 @@ NOTE: If you want to turn off broadcasting to work in only one window, type ctrl
 These next steps we are doing outside a setup script for the moment - TODO: wrap them up. 
 In your local terminal
 
-```
+```python
 ssh-keygen -t rsa -f ~/.ssh/pod_key -N '' -C 'my_tpu_pod'
 # give all workers the public key so we can copy it to authorised hosts
 gcloud compute tpus tpu-vm scp ~/.ssh/pod_key.pub $TPU_NAME:.ssh/pod_key.pub --worker=all --zone=$ZONE
@@ -51,7 +51,7 @@ gcloud compute tpus tpu-vm scp ~/.ssh/pod_key $TPU_NAME:.ssh/pod_key --worker=al
 ```
 In your remote terminal
 
-```
+```yaml
 # include the pubkey in authorised keys
 cat .ssh/pod_key.pub >> .ssh/authorized_keys
 chmod 600 ~/.ssh/pod_key

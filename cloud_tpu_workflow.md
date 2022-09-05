@@ -48,3 +48,11 @@ Now, we should have two terminals.
 
 > **Note**
 > If you wanted, you could now go to the tmux terminal of any of the machines, turn off broadcasting and then ssh into any other machine using 'ssh -i ~/.ssh/pod_key INSERT_INTERNAL_IP_HERE', where the internal ip addresses were printed earlier by our script (or you can look them up in gcp). This is what we will use to automatically synchronize files from host 0 to the others.
+
+### Editing code
+
+Now you can edit code anyway you like!
+
+Personally, I like to use vs-code remote to jump directly into host 0 and make edits there. Then, when you want to run a file take advantage of the terminal broadcasting to simply run it across all panes in tmux as though you had one terminal. 
+
+Other options I've heard that work well are emacs on host 0, using terminal broadcasting!

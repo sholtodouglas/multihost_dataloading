@@ -1,6 +1,12 @@
 We'll be working with two terminal windows here - one locally for setup, and one connected to our host TPUs in the slice.
 
-### On your first terminal window
+### Go to a one terminal window to create the tmux session we'll be using for remote access
+```yaml
+# Go to a new terminal window, and create this tmux session
+tmux new-session -s pod_control_pane
+```
+
+### On another terminal window
 
 Create our system variables
 
@@ -27,13 +33,6 @@ If you have never used scp with gcp before, you should do this
 ssh-add ~/.ssh/google_compute_engine
 ```
 
-### Go to a new terminal window to create the tmux session we'll be using for remote access
-```yaml
-# Go to a new terminal window, and create this tmux session
-tmux new-session -s pod_control_pane
-```
-
-### Back to the original terminal window
 ```ruby
 # From your original terminal window, run this python script which will connect to the tmux session, create a window for every host in the TPU slice, setup terminal broadcasting. 
 python3 workflow_setup/setup_hosts.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT

@@ -60,6 +60,6 @@ Other options I've heard that work well are emacs on host 0, using terminal broa
 > **Warning**
 > Anything in 'working_dir' will be replicated across tpus - so aim not to store weights or data in there. 
 
-> **Warning**
+> **Note**
 > If you interrupt the script during scp, gcp is sometimes interrupted while writing to google_compute_known_hosts, and will fail the next time you try as the keys of the remote address do not match what it expects. To fix this, go to ~/.ssh/google_compute_known_hosts, and delete the lines corresponding to this tpu so it can start fresh.
 

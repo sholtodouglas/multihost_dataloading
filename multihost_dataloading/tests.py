@@ -1,4 +1,3 @@
-from email.policy import default
 import jax
 from jax.experimental.maps import Mesh
 from jax.experimental import PartitionSpec as P
@@ -6,10 +5,15 @@ from jax.experimental.global_device_array import GlobalDeviceArray
 from jax.experimental import global_device_array as gda_lib
 import numpy as np
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Tuple
 
 # make pjit output GDAs
 jax.config.update('jax_parallel_functions_output_gda', True)
 
+# TODO: Typing - e.g. for TfrtTpuDevices
+
+_hashed_set_of_slices = lambda slices: hash(np.array([(v.start, v.stop) for sli in slices for v in sli]).tobytes())
 
 def device_to_host(devices):
   '''Gets mapping from/to device ID <> host ID.
@@ -112,16 +116,132 @@ def construct_GDA(global_data_shape, device_mesh, data_axes, device_to_pipeline,
 
   return GlobalDeviceArray(global_data_shape, device_mesh, data_axes, device_buffers)
 
-  # def _gda(global_data_shape, dbs):
-  #   return GlobalDeviceArray(global_data_shape, device_mesh, data_axes, dbs)
-  # return jax.tree_map(
-  #     _gda,
-  #     device_buffers,
-  #     global_data_shape)
+
+def test_per_replica_data_pipeline():
+  '''
+  We follow these steps:
+  1. Initialise our desired GDA shape and device mesh layout
+  2. Get the slices of the GDA corresponding to each device
+  3. For each host, identify which slices it needs to load to feed it's devices
+  4. Deduplicate these slices
+  5. Load the slices (in this test, from an array - TODO: from .tfrecords)
+  6. Load them into the local device buffers and wrap it as one big GDA
+  '''
+
+# 1. Initialise our desired GDA shape and deivce mesh layout
+# Construct global data
+global_data_shape = (8, 4)
+global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
+data_axes = P('data', None)
+# Create our device mesh - this function arranges a 4 hosts/32 devices
+# to allow us to test the general case
+devices = jax.devices()
+host_devices_map = device_to_host(devices)
+test_mesh_layout = construct_test_mesh_32(host_devices_map)
+# imagine these integers are host id, and the numbers are each a device
+# we create four replicas, each split over two hosts
+#     00001111
+#     00001111
+#     22223333
+#     22223333
+global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
+
+# 2. Get the slices of the GDA corresponding to each device
+# returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
+#                                   (slice(6, 8, None), slice(None, None, None)),]
+devices_to_slices = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
+
+all_slices = [(device, devices_to_slices[device]) for device in devices]
+# 
+# 3. For each host, identify which slices of the GDA it needs to feed it's devices
+#       data_dim          model_dim (replicated)
+# [((slice(0, 2, None), slice(None, None, None)),...]
+local_slices = [(device, devices_to_slices[device]) for device in jax.local_devices()]
+# 4. Deduplicate these slices locally - each slice corresponds to a 'pipeline' required to load it
+slices, device_to_slice = deduplicate_slices(local_slices)
+
+#  5. Load the slices to the host (in this test, from an array - TODO: from .tfrecords)
+unique_host_buffers = load_slices_to_host(global_data, slices)
+
+# 6. Load them into the local device buffers and wrap it as one big GDA
+gda = construct_GDA(global_data_shape, global_mesh, data_axes, device_to_slice, unique_host_buffers)
+
+local_shards = [shard.data for shard in gda.local_shards]
+
+print(gda.local_data(0))
+print(gda.local_data(4))
+
+expected = np.split(global_data, 4, axis=0) # TODO: tidy
+if jax.process_index == 0:
+  assert gda.local_data(0) == expected[0]
+  assert gda.local_data(4) == expected[1]
+if jax.process_index == 2:
+  assert gda.local_data(0) == expected[2]
+  assert gda.local_data(4) == expected[3]
+
+print("Option 3 '\u2713'")
   
 
+###############################################################################################
+######################## Per host data pipeline ###############################################
+###############################################################################################
 
-def test_one():
+def get_total_length_of_unique_slices(unique_slices):
+  size = 0
+  for (data,model) in unique_slices:
+    size += data.stop - data.start
+  return size
+
+
+@dataclass
+class Pipeline():
+  hash: int
+  size: int # contiguous length
+  indices: Tuple[slice, slice]
+
+
+def create_per_host_pipeline(host_devices_map, devices_to_slices):
+  unique_pipelines = {int: Pipeline}
+  host_to_pipeline_hash = {}
+  device_to_pipeline_indices = {}
+  running_indice = 0
+  for host_id, host_devices in host_devices_map.items():
+    #  [((slice(0, 2, None), slice(None, None, None)),...]
+    host_slices = [(device, devices_to_slices[device]) for device in host_devices]
+    # deduplicate these
+    slice_hash_to_unique_slices, device_to_slice_hash = deduplicate_slices(host_slices)
+    unique_slices = [v for k,v in slice_hash_to_unique_slices.items()]
+    # hash the unique set for this host
+    pipeline_hash = _hashed_set_of_slices(unique_slices)
+    host_to_pipeline_hash[host_id] = pipeline_hash
+    pipeline_size = get_total_length_of_unique_slices(unique_slices)
+    if pipeline_hash not in unique_pipelines:
+      # No model parallel slicing at the moment
+      indices = (slice(running_indice, running_indice+pipeline_size, None), slice(None, None, None))
+      running_indice += pipeline_size
+      pipeline = Pipeline(pipeline_hash, pipeline_size, indices)
+      unique_pipelines[pipeline_hash] = pipeline
+    # NOTE: This does not allow for overlap of examples between hosts. It allows them to have the same examples 
+    # (for model parallel hosts) but not different sets of overlap at a host level, we are determining how many 
+    # unique pipelines there are and assigning each a contiguous slice of the data  within a host, we do the same 
+    # - how many unique slices are there, map each device to a slice hash and give them a contiguous slice of
+    # the data loaded by that host
+    data_per_device = pipeline_size // len(unique_slices)
+    slice_hash_to_pipeline_indices = {gda_lib._hashed_index(slice_tuple): \
+                                                                        slice(i*data_per_device,(i+1)*data_per_device, None) \
+                                                                          for i, slice_tuple in enumerate(unique_slices)}
+    # pipeline indices are the local indices of the data to be loaded by the pipeline
+    for device, slice_hash in device_to_slice_hash.items():
+      device_to_pipeline_indices[device] = slice_hash_to_pipeline_indices[slice_hash] 
+
+  return unique_pipelines, host_to_pipeline_hash, device_to_pipeline_indices
+
+
+def load_pipeline(global_data, pipeline):
+  '''TODO: Make this a tf record based system'''
+  return global_data[pipeline.indices]
+
+def test_per_host_data_pipeline():
   '''
   We follow these steps:
 
@@ -161,33 +281,46 @@ def test_one():
   all_slices = [(device, devices_to_slices[device]) for device in devices]
 
   # What the t5x example does here is it splits the total length of the input data array
-  #  by num unique slices and assigns each slice (or 'pipeline') to a host.
+  # by num unique slices and assigns each slice (or 'pipeline') to a host.
   # This doesn't account for the situation where multiple hosts might WANT to load the
   # same data. E.g in our case there are 4 unique slices ('pipelines'), but what we want
   # to test is each host loading the data required of it and not needing to reshard
   # during pjit. Instead, what we will do is:
 
-  # 
-  # 3. For each host, identify which slices of the GDA it needs to feed it's devices
-  #       data_dim          model_dim (replicated)
-  # [((slice(0, 2, None), slice(None, None, None)),...]
-  local_slices = [(device, devices_to_slices[device]) for device in jax.local_devices()]
-  # 4. Deduplicate these slices locally - each slice corresponds to a 'pipeline' required to load it
-  slices, device_to_slice = deduplicate_slices(local_slices)
+  # 3. Create the unique pipelines
+  unique_pipelines, host_to_pipeline_hash, device_to_pipeline_indices = create_per_host_pipeline(host_devices_map, devices_to_slices)
 
-  #  5. Load the slices to the host (in this test, from an array - TODO: from .tfrecords)
-  unique_host_buffers = load_slices_to_host(global_data, slices)
+  my_pipeline = unique_pipelines[host_to_pipeline_hash[jax.process_index()]]
 
-  # 6. Load them into the local device buffers and wrap it as one big GDA
-  gda = construct_GDA(global_data_shape, global_mesh, data_axes, device_to_slice, unique_host_buffers)
+  # 4. Load one contiguous section from that pipeline
+  local_data = load_pipeline(global_data, my_pipeline)
 
-  local_shards = [shard.data for shard in gda.local_shards]
+  # 5. Slice this up and give it to the devices
+  device_buffers = []
+  for device in jax.local_devices():
+    indices = device_to_pipeline_indices[device]
+    data = local_data[indices]
+    device_buffers.append(jax.device_put(data, device))
+
+  # # 6. Load them into the local device buffers and wrap it as one big GDA
+  gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes, device_buffers)
+  # local_shards = [shard.data for shard in gda.local_shards]
 
   print(gda.local_data(0))
   print(gda.local_data(4))
 
+  expected = np.split(global_data, 4, axis=0) # TODO: tidy
+  if jax.process_index == 0:
+    assert gda.local_data(0) == expected[0]
+    assert gda.local_data(4) == expected[1]
+  if jax.process_index == 2:
+    assert gda.local_data(0) == expected[2]
+    assert gda.local_data(4) == expected[3]
 
-test_one()
+  print("Option 4 '\u2713'")
+
+test_per_replica_data_pipeline()
+test_per_host_data_pipeline()
 
 
   

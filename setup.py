@@ -4,7 +4,7 @@ import os
 import sys
 import setuptools
 
-_jax_version = '0.2.27'
+_jax_version = '0.2.16'
 _jaxlib_version = '0.1.76'
 
 setuptools.setup(

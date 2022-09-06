@@ -133,7 +133,7 @@ if __name__ == "__main__":
     tmux_shell(f'cd {args.working_dir}')
     print(f'{OKGREEN}Connected to all hosts {ENDC}')
   # #############################################################################
-  # ########## Set up the fswatch sync across working dirs ############
+  # ########## Set up the fswatch sync across working dirs #####################
   # #############################################################################
   if args.skip_setup_fswatch:
     print("Skipping fswatch - you're already syncing")

@@ -4,5 +4,5 @@ Experimenting with how best to do multi-host dataloading
 Install with the following
 
 ```
-pip install -e .[extra]
+pip install -e .
 ```

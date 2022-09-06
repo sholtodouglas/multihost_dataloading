@@ -57,6 +57,7 @@ Personally, I like to use vs-code remote to jump directly into host 0 and make e
 Other options I've heard that work well are emacs on host 0, using terminal broadcasting!
 
 > **Warning**
+> If the files have not synced and you run them, they may hang. One way to confirm they've synced is to run 'md5sum FILENAME' and confirm the hashes are the same. 
 > Anything in 'working_dir' will be replicated across tpus - so aim not to store weights or data in there. 
 
 > **Note**

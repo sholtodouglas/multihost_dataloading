@@ -41,8 +41,4 @@ setuptools.setup(
     #         'gevent', 'google-api-python-client', 'google-compute-engine',
     #         'google-cloud-storage', 'oauth2client'
     #     ],
-    #     'test': ['pytest'],
-
-    #     # Cloud TPU requirements.
-    #     'tpu': [f'jax[tpu] >= {_jax_version}'],
     # },

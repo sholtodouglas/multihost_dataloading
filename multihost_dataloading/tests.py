@@ -200,26 +200,26 @@ class Pipeline():
 
 
 def create_per_host_pipeline(host_devices_map, device_to_index_map):
-  unique_contiguous_global_indexes = {int: Pipeline}
+  hash_to_unique_contiguous_global_indexes = {int: Pipeline}
   host_to_contiguous_global_index_hash = {}
   device_to_local_indexes = {}
-  running_indice = 0
+  running_index = 0
   for host_id, host_devices in host_devices_map.items():
     #  [((slice(0, 2, None), slice(None, None, None)),...]
-    host_indexes = [(device, device_to_index_map[device]) for device in host_devices]
+    host_device_to_global_indexes = [(device, device_to_index_map[device]) for device in host_devices]
     # deduplicate these
-    slice_hash_to_unique_indexes, device_to_slice_hash = deduplicate_indexes(host_indexes)
-    unique_indexes = [v for k,v in slice_hash_to_unique_indexes.items()]
-    # hash the unique set for this host
+    index_hash_to_indexes_unique, device_to_slice_hash = deduplicate_indexes(host_device_to_global_indexes)
+    unique_indexes = [v for _,v in index_hash_to_indexes_unique.items()]
+    # hash the set of indices for this host
     pipeline_hash = _hashed_set_of_indexes(unique_indexes)
     host_to_contiguous_global_index_hash[host_id] = pipeline_hash
     pipeline_size = get_total_length_of_unique_indexes(unique_indexes)
-    if pipeline_hash not in unique_contiguous_global_indexes:
+    if pipeline_hash not in hash_to_unique_contiguous_global_indexes:
       # No model parallel slicing at the moment
-      indices = (slice(running_indice, running_indice+pipeline_size, None), slice(None, None, None))
-      running_indice += pipeline_size
+      indices = (slice(running_index, running_index+pipeline_size, None), slice(None, None, None))
+      running_index += pipeline_size
       pipeline = Pipeline(pipeline_hash, pipeline_size, indices)
-      unique_contiguous_global_indexes[pipeline_hash] = pipeline
+      hash_to_unique_contiguous_global_indexes[pipeline_hash] = pipeline
     # NOTE: This does not allow for overlap of examples between hosts. It allows them to have the same examples 
     # (for model parallel hosts) but not different sets of overlap at a host level, we are determining how many 
     # unique pipelines there are and assigning each a contiguous slice of the data  within a host, we do the same 
@@ -233,26 +233,18 @@ def create_per_host_pipeline(host_devices_map, device_to_index_map):
     for device, slice_hash in device_to_slice_hash.items():
       device_to_local_indexes[device] = slice_hash_to_pipeline_indices[slice_hash] 
 
-  return unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes
+  return hash_to_unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes
 
 
 def load_pipeline(global_data, pipeline):
-  '''TODO: Make this a tf record based system'''
+  '''
+  In this example we load from an np array. 
+  TODO: Load from a unique set of tfrecords.
+  '''
   return global_data[pipeline.indices]
 
 def test_per_host_data_pipeline():
-  '''
-  We follow these steps:
-
-  1. Initialise our desired GDA shape and device mesh layout
-  2. Get the indexes of the GDA corresponding to each device
-  3. For each host, identify which indexes it needs to load to feed it's devices
-  4. Deduplicate these indexes
-  5. Load the slices (in this test, from an array - TODO: from .tfrecords)
-  6. Load them into the local device buffers and wrap it as one big GDA
-
-
-  '''
+  '''Test the case where we have one data pipeline per host.'''
 
   # 1. Initialise our desired GDA shape and deivce mesh layout
   # Construct global data
@@ -272,7 +264,7 @@ def test_per_host_data_pipeline():
   #     22223333
   #     22223333
   
-  # 2. Get the slices of the GDA corresponding to each device
+  # 2. Get the slices of the GDA corresponding to each device (globally)
   # returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
   #                                   (slice(6, 8, None), slice(None, None, None)),]
   device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
@@ -284,15 +276,16 @@ def test_per_host_data_pipeline():
   # to test is each host loading the data required of it and not needing to reshard
   # during pjit. Instead, what we will do is:
 
-  # 3. Create contiguous, unique indices representing each data pipeline
-  unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes = create_per_host_pipeline(host_devices_map, device_to_index)
-  # unique_contiguous_global_indexes: Objects representing slices like 0:4, 4:8  of the global data array
+  # 3. Remap the indices each host should load to one contiguous set per host
+  hash_to_unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes = create_per_host_pipeline(host_devices_map, device_to_index)
+  # hash_to_unique_contiguous_global_indexes: Objects representing slices like 0:4, 4:8  of the global data array
   # host_to_contiguous_global_index_hash: which contiguous section should each host load
   # device_to_local_indexes: of that contiguous section, which LOCAL indices go to which device
 
   # host_contiguous_indexes_to_load: which contiguous section should each host load
-  host_contiguous_indexes_to_load = unique_contiguous_global_indexes[host_to_contiguous_global_index_hash[jax.process_index()]]
+  host_contiguous_indexes_to_load = hash_to_unique_contiguous_global_indexes[host_to_contiguous_global_index_hash[jax.process_index()]]
 
+  # End setup - begin iteration. Everything before this you only need to do once.
   # 4. Load that section
   local_data = load_pipeline(global_data, host_contiguous_indexes_to_load)
 
@@ -325,3 +318,4 @@ test_per_host_data_pipeline()
 
 
   
+# Note: tests which set up one host to have multiple processes https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

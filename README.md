@@ -7,4 +7,6 @@ Install with the following
 git clone https://github.com/sholtodouglas/multihost_dataloading
 cd multihost_dataloading
 pip install -e .
+
+python3 multihost_dataloading/tests.py
 ```

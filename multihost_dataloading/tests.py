@@ -90,30 +90,25 @@ def deduplicate_indexes(local_indexes: List[Tuple[Device, Tuple[slice,
   Returns the unique set of indexes we need to load locally
   And the mapping of device to those indexes
   """
-  unique_local_indexes = {}
+  index_hash_to_index_unique = {}
   local_device_to_index_hash = {}
 
-  for (device, slice_tuple) in local_indexes:
-    slice_hash = gda_lib._hashed_index(slice_tuple)
-    if slice_hash not in unique_local_indexes:
-      unique_local_indexes[slice_hash] = slice_tuple  # d
-    local_device_to_index_hash[device] = slice_hash
+  for (device, index_tuple) in local_indexes:
+    index_hash = gda_lib._hashed_index(index_tuple)
+    index_hash_to_index_unique[index_hash] = index_tuple  # any entry fine
+    local_device_to_index_hash[device] = index_hash
 
-  return unique_local_indexes, local_device_to_index_hash
+  return index_hash_to_index_unique, local_device_to_index_hash
 
 
-def load_slices_to_host(global_data, pipelines: Dict[int, Tuple[slice, slice]]):
+def load_indices_to_host(global_data, pipelines: Dict[int, Tuple[slice, slice]]):
   """ For the moment just load from an array.
-
-  TODO: Load from tf.data
-  The device to pipeline hash will share the same hash here, so we
-  can directly put from these buffers into local_device_buffers to
-  form a GDA.
+  TODO: Load from tf.data, indexed by 
   """
-  unique_host_buffers = {}
-  for hash, slice in pipelines.items():
-    unique_host_buffers[hash] = global_data[slice]
-  return unique_host_buffers
+  hash_to_loaded_indexes = {}
+  for hash, indexes in pipelines.items():
+    hash_to_loaded_indexes[hash] = global_data[indexes]
+  return hash_to_loaded_indexes
 
 
 # instead of a million hash look ups, easier to just do equality checks
@@ -164,18 +159,19 @@ def test_per_replica_data_pipeline():
   local_indexes = [
       (device, device_to_index[device]) for device in jax.local_devices()
   ]
-  # 4. Deduplicate indexes locally - each corresponds to a 'pipeline' used to load it
-  unique_local_indexes, local_device_to_index_hash = deduplicate_indexes(
+  # 4. Deduplicate indexes locally - and pair each device with a hash to look
+  #    up the data to be loaded by the host
+  index_hash_to_index_unique, local_device_to_index_hash = deduplicate_indexes(
       local_indexes)
 
   # Below here is where you would loop
-  #  5. Load the slices to the host  TODO: from .tfrecords)
-  unique_host_buffers = load_slices_to_host(global_data, unique_local_indexes)
+  #  5. Load the slices to the host  
+  hash_to_loaded_indexes = load_indices_to_host(global_data, index_hash_to_index_unique)
 
   # 6. Load them into the local device buffers and wrap it as one big GDA
   device_buffers = []
   for device, index_hash in local_device_to_index_hash.items():
-    host_data = unique_host_buffers[index_hash]
+    host_data = hash_to_loaded_indexes[index_hash]
     device_buffers.append(jax.device_put(host_data, device))
 
   gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes,
@@ -184,13 +180,14 @@ def test_per_replica_data_pipeline():
   print(gda.local_data(0))
   print(gda.local_data(4))
 
-  expected = np.split(global_data, 4, axis=0)  # TODO: tidy
-  if jax.process_index == 0:
-    assert gda.local_data(0) == expected[0]
-    assert gda.local_data(4) == expected[1]
-  if jax.process_index == 2:
-    assert gda.local_data(0) == expected[2]
-    assert gda.local_data(4) == expected[3]
+  expected = np.split(global_data, 4, axis=0)  # TODO: more general
+  if jax.process_index() == 0 or jax.process_index() == 1:
+    assert (gda.local_data(0) == expected[0]).all()
+    assert (gda.local_data(4) == expected[1]).all()
+  if jax.process_index() == 2 or jax.process_index() == 3:
+    assert (gda.local_data(0) == expected[2]).all()
+    assert (gda.local_data(4) == expected[3]).all()
+
 
   print("Option 3 '\u2713'")
 
@@ -264,15 +261,15 @@ def create_per_host_pipeline(host_to_devices: Dict[int, List[Device]],
     # map each device to a index hash and give them a subsection of the data
     # loaded by that host
     data_per_device = pipeline_size // len(unique_indexes)
-    slice_hash_to_pipeline_indices = {
-        gda_lib._hashed_index(slice_tuple):
+    index_hash_to_pipeline_indices = {
+        gda_lib._hashed_index(index_tuple):
         slice(i * data_per_device, (i + 1) * data_per_device, None)
-        for i, slice_tuple in enumerate(unique_indexes)
+        for i, index_tuple in enumerate(unique_indexes)
     }
     # pipeline indices are the local indices of the data to be loaded by the pipeline
-    for local_device, slice_hash in device_to_index_hash.items():
-      device_to_local_indexes[local_device] = slice_hash_to_pipeline_indices[
-          slice_hash]
+    for local_device, index_hash in device_to_index_hash.items():
+      device_to_local_indexes[local_device] = index_hash_to_pipeline_indices[
+          index_hash]
 
   return hash_to_unique_pipeline, host_to_pipeline_hash, device_to_local_indexes
 
@@ -351,13 +348,16 @@ def test_per_host_data_pipeline():
   print(gda.local_data(0))
   print(gda.local_data(4))
 
-  expected = np.split(global_data, 4, axis=0)  # TODO: tidy
-  if jax.process_index == 0:
-    assert gda.local_data(0) == expected[0]
-    assert gda.local_data(4) == expected[1]
-  if jax.process_index == 2:
-    assert gda.local_data(0) == expected[2]
-    assert gda.local_data(4) == expected[3]
+
+
+  expected = np.split(global_data, 4, axis=0)  # TODO: more general
+
+  if jax.process_index() == 0 or jax.process_index() == 1:
+    assert (gda.local_data(0) == expected[0]).all()
+    assert (gda.local_data(4) == expected[1]).all()
+  if jax.process_index() == 2 or jax.process_index() == 3:
+    assert (gda.local_data(0) == expected[2]).all()
+    assert (gda.local_data(4) == expected[3]).all()
 
   print("Option 4 '\u2713'")
 
@@ -365,4 +365,5 @@ def test_per_host_data_pipeline():
 test_per_replica_data_pipeline()
 test_per_host_data_pipeline()
 
-# Note: tests which set up one host to have multiple processes https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py
+# Note: tests which set up one host to have multiple processes
+#  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

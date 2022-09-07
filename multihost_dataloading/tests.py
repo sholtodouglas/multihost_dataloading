@@ -21,11 +21,10 @@ _hashed_set_of_indexes = lambda indexes: hash(
 
 
 def device_to_host(devices: List[Device]):
-  """Gets mapping from/to device ID <> host ID.
+  """Gets mapping host to list of all devices.
 
-  Use the host->devices mapping to specify global device layouts that all hosts
-  have visibility over (otherwise they would only have the indices of theirs).
-
+  Use this when we need to be able to arrange all devices by host
+  rather than accessing the devices on a host itself.
 
   Args:
     devices: [TpuDevice(id=0, process_index=0, coords=(0,0,0),
@@ -38,28 +37,25 @@ def device_to_host(devices: List[Device]):
   host_to_devices = defaultdict(list)
   for d in devices:
     host_to_devices[d.host_id].append(d)  # default dict so no need to check
-
   return host_to_devices
 
 
 # TODO: Check this function and dehackify it
 def construct_test_mesh_32(host_to_devices: Dict[int, List[Device]]):
-  """By default, when we reshape a 32 (i.e.
+  """Constructs a non-standard mesh layout to test all cases.
 
-  4 hosts, 8 devices each) slice to (data, model) unless the length of the
-  model dimension is great than the number of devices per host, it will not
-  be arranged with the second dimension crossing host boundaries.
+  By default, when we reshape a 32 (i.e. 4 hosts, 8 devices each) slice to (data, model) 
+  unless the length of the model dimension is great than the number of devices per host, 
+  it will not be arranged with the second dimension crossing host boundaries.
   This makes sense - but we want to test the most general case: where a given
-  host may have
-  multiple independent model replicas on it (each loading different data), and
-  where these
-  replicas may stretch across host boundaries.
+  host may have multiple independent model replicas on it (each loading different data),
+  and where these replicas may stretch across host boundaries.
 
   This may occur! E.g. PaLM used 12 way model parallelism in a given replica.
   Therefore the layout may have been that one host had 8, the next 4 + 4, the
   next 8?
 
-  To test this, we want a layout that looks like this, indices indicate host idx
+  To test this, we want a layout that looks like this, values indicate host idx
   of devices
 
       00001111
@@ -85,10 +81,10 @@ def construct_test_mesh_32(host_to_devices: Dict[int, List[Device]]):
 
 def deduplicate_indexes(local_indexes: List[Tuple[Device, Tuple[slice,
                                                                 slice]]]):
-  """[(slice(4, 6, None), slice(None, None, None)),..]
-
-  Returns the unique set of indexes we need to load locally
-  And the mapping of device to those indexes
+  """Returns the unique set of indexes we need to load locally
+  And the mapping of device to those indexes (so we only need to
+  lookup the data loaded for that index, rather than loading it 
+  once per device).
   """
   index_hash_to_index_unique = {}
   local_device_to_index_hash = {}
@@ -102,16 +98,13 @@ def deduplicate_indexes(local_indexes: List[Tuple[Device, Tuple[slice,
 
 
 def load_indices_to_host(global_data, pipelines: Dict[int, Tuple[slice, slice]]):
-  """ For the moment just load from an array.
-  TODO: Load from tf.data, indexed by 
+  """Load the data for a given set of indices to the GDA to the host.
+  For the moment just load from an array. TODO: Load from tf.data.
   """
   hash_to_loaded_indexes = {}
   for hash, indexes in pipelines.items():
     hash_to_loaded_indexes[hash] = global_data[indexes]
   return hash_to_loaded_indexes
-
-
-# instead of a million hash look ups, easier to just do equality checks
 
 ################################################################################
 ######################## Per replica data pipeline #############################
@@ -274,14 +267,6 @@ def create_per_host_pipeline(host_to_devices: Dict[int, List[Device]],
   return hash_to_unique_pipeline, host_to_pipeline_hash, device_to_local_indexes
 
 
-def load_pipeline(global_data, pipeline: Pipeline):
-  """In this example we load from an np array.
-
-  TODO: Load from a unique set of tfrecords.
-  """
-  return global_data[pipeline.contiguous_indices]
-
-
 def test_per_host_data_pipeline():
   """Test the case where we have one data pipeline per host."""
 
@@ -330,8 +315,8 @@ def test_per_host_data_pipeline():
       jax.process_index()]]
 
   # End setup - begin iteration. 
-  # 4. Load that section
-  local_data = load_pipeline(global_data, host_pipeline_to_load)
+  # 4. Load that section TODO: replace this with tf.data pipeline load
+  local_data = global_data[host_pipeline_to_load.contiguous_indices] 
 
   # 5. Slice this up using local indices and give it to the host local devices
   device_buffers = []
@@ -347,9 +332,7 @@ def test_per_host_data_pipeline():
 
   print(gda.local_data(0))
   print(gda.local_data(4))
-
-
-
+  
   expected = np.split(global_data, 4, axis=0)  # TODO: more general
 
   if jax.process_index() == 0 or jax.process_index() == 1:

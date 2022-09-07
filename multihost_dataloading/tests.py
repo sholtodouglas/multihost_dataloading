@@ -13,7 +13,7 @@ jax.config.update('jax_parallel_functions_output_gda', True)
 
 # TODO: Typing - e.g. for TfrtTpuDevices
 
-_hashed_set_of_slices = lambda slices: hash(np.array([(v.start, v.stop) for sli in slices for v in sli]).tobytes())
+_hashed_set_of_indexes = lambda indexes: hash(np.array([(v.start, v.stop) for idx in indexes for v in idx]).tobytes())
 
 def device_to_host(devices):
   '''Gets mapping from/to device ID <> host ID.
@@ -75,26 +75,26 @@ def construct_test_mesh_32(host_devices_map):
 
   return test_mesh_layout
 
-def deduplicate_slices(local_slices):
+def deduplicate_indexes(local_indexes):
   '''
   [(slice(4, 6, None), slice(None, None, None)), (slice(4, 6, None), slice(None, None, None)), (slice(6, 8, None), slice(None, None, None)), (slice(6, 8│one, None, None)), (slice(2, 4, None), slice(None, None, None)), (slice(2, 4, None), slice(None, None, Non
   , None), ...]
   
-  Returns the unique set of slices we need to load locally
-  And the mapping of device to those slices
+  Returns the unique set of indexes we need to load locally
+  And the mapping of device to those indexes
   '''
-  unique_slices = {}
-  device_to_slice = {}
+  unique_local_indexes = {}
+  local_device_to_slice_hash = {}
 
-  for (device, slice_tuple) in local_slices:
+  for (device, slice_tuple) in local_indexes:
     slice_hash = gda_lib._hashed_index(slice_tuple)
-    if slice_hash not in unique_slices:
-      unique_slices[slice_hash] = slice_tuple # d
-    device_to_slice[device] = slice_hash
+    if slice_hash not in unique_local_indexes:
+      unique_local_indexes[slice_hash] = slice_tuple # d
+    local_device_to_slice_hash[device] = slice_hash
 
-  # unique_slices : {((4, 6), (None, None)): (slice(4, 6, None), slice(None, None, None)), ((6, 8), (None, None)): (slice(6, 8, None), slice(None, None, None))}
-  # device_to_slice: [{TpuDevice(id=16, process_index=2, coords=(0,2,0), core_on_chip=0): ((4, 6), (None, None)),...]
-  return unique_slices, device_to_slice
+  # unique_indexes : {((4, 6), (None, None)): (slice(4, 6, None), slice(None, None, None)), ((6, 8), (None, None)): (slice(6, 8, None), slice(None, None, None))}
+  # device_to_slice_hash: [{TpuDevice(id=16, process_index=2, coords=(0,2,0), core_on_chip=0): 12334567,...]
+  return unique_local_indexes, local_device_to_slice_hash
 
 def load_slices_to_host(global_data, pipelines):
   ''' For the moment just load from an array. TODO: Load from tf.data
@@ -116,15 +116,16 @@ def construct_GDA(global_data_shape, device_mesh, data_axes, device_to_pipeline,
 
   return GlobalDeviceArray(global_data_shape, device_mesh, data_axes, device_buffers)
 
+# instead of a million hash look ups, easier to just do equality checks
 
 def test_per_replica_data_pipeline():
   '''
   We follow these steps:
   1. Initialise our desired GDA shape and device mesh layout
-  2. Get the slices of the GDA corresponding to each device
-  3. For each host, identify which slices it needs to load to feed it's devices
-  4. Deduplicate these slices
-  5. Load the slices (in this test, from an array - TODO: from .tfrecords)
+  2. Get the indexes of the GDA corresponding to each device
+  3. For each host, identify which indexes it needs to load to feed it's devices
+  4. Deduplicate these indexes
+  5. Load the indexes (in this test, from an array - TODO: from .tfrecords)
   6. Load them into the local device buffers and wrap it as one big GDA
   '''
 
@@ -146,25 +147,23 @@ test_mesh_layout = construct_test_mesh_32(host_devices_map)
 #     22223333
 global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
 
-# 2. Get the slices of the GDA corresponding to each device
+# 2. Get the indexes of the GDA corresponding to each device
 # returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
 #                                   (slice(6, 8, None), slice(None, None, None)),]
-devices_to_slices = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
+device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
 
-all_slices = [(device, devices_to_slices[device]) for device in devices]
-# 
-# 3. For each host, identify which slices of the GDA it needs to feed it's devices
+# 3. For each host, identify which indexes of the GDA it needs to feed it's local devices
 #       data_dim          model_dim (replicated)
 # [((slice(0, 2, None), slice(None, None, None)),...]
-local_slices = [(device, devices_to_slices[device]) for device in jax.local_devices()]
-# 4. Deduplicate these slices locally - each slice corresponds to a 'pipeline' required to load it
-slices, device_to_slice = deduplicate_slices(local_slices)
+local_indexes = [(device, device_to_index[device]) for device in jax.local_devices()]
+# 4. Deduplicate these indexes locally - each slice corresponds to a 'pipeline' required to load it
+unique_local_indexes, local_device_to_index_hash = deduplicate_indexes(local_indexes)
 
 #  5. Load the slices to the host (in this test, from an array - TODO: from .tfrecords)
-unique_host_buffers = load_slices_to_host(global_data, slices)
+unique_host_buffers = load_slices_to_host(global_data, unique_local_indexes)
 
 # 6. Load them into the local device buffers and wrap it as one big GDA
-gda = construct_GDA(global_data_shape, global_mesh, data_axes, device_to_slice, unique_host_buffers)
+gda = construct_GDA(global_data_shape, global_mesh, data_axes, local_device_to_index_hash, unique_host_buffers)
 
 local_shards = [shard.data for shard in gda.local_shards]
 
@@ -186,9 +185,9 @@ print("Option 3 '\u2713'")
 ######################## Per host data pipeline ###############################################
 ###############################################################################################
 
-def get_total_length_of_unique_slices(unique_slices):
+def get_total_length_of_unique_indexes(unique_indexes):
   size = 0
-  for (data,model) in unique_slices:
+  for (data,model) in unique_indexes:
     size += data.stop - data.start
   return size
 
@@ -200,41 +199,41 @@ class Pipeline():
   indices: Tuple[slice, slice]
 
 
-def create_per_host_pipeline(host_devices_map, devices_to_slices):
-  unique_pipelines = {int: Pipeline}
-  host_to_pipeline_hash = {}
-  device_to_pipeline_indices = {}
+def create_per_host_pipeline(host_devices_map, device_to_index_map):
+  unique_contiguous_global_indexes = {int: Pipeline}
+  host_to_contiguous_global_index_hash = {}
+  device_to_local_indexes = {}
   running_indice = 0
   for host_id, host_devices in host_devices_map.items():
     #  [((slice(0, 2, None), slice(None, None, None)),...]
-    host_slices = [(device, devices_to_slices[device]) for device in host_devices]
+    host_indexes = [(device, device_to_index_map[device]) for device in host_devices]
     # deduplicate these
-    slice_hash_to_unique_slices, device_to_slice_hash = deduplicate_slices(host_slices)
-    unique_slices = [v for k,v in slice_hash_to_unique_slices.items()]
+    slice_hash_to_unique_indexes, device_to_slice_hash = deduplicate_indexes(host_indexes)
+    unique_indexes = [v for k,v in slice_hash_to_unique_indexes.items()]
     # hash the unique set for this host
-    pipeline_hash = _hashed_set_of_slices(unique_slices)
-    host_to_pipeline_hash[host_id] = pipeline_hash
-    pipeline_size = get_total_length_of_unique_slices(unique_slices)
-    if pipeline_hash not in unique_pipelines:
+    pipeline_hash = _hashed_set_of_indexes(unique_indexes)
+    host_to_contiguous_global_index_hash[host_id] = pipeline_hash
+    pipeline_size = get_total_length_of_unique_indexes(unique_indexes)
+    if pipeline_hash not in unique_contiguous_global_indexes:
       # No model parallel slicing at the moment
       indices = (slice(running_indice, running_indice+pipeline_size, None), slice(None, None, None))
       running_indice += pipeline_size
       pipeline = Pipeline(pipeline_hash, pipeline_size, indices)
-      unique_pipelines[pipeline_hash] = pipeline
+      unique_contiguous_global_indexes[pipeline_hash] = pipeline
     # NOTE: This does not allow for overlap of examples between hosts. It allows them to have the same examples 
     # (for model parallel hosts) but not different sets of overlap at a host level, we are determining how many 
     # unique pipelines there are and assigning each a contiguous slice of the data  within a host, we do the same 
-    # - how many unique slices are there, map each device to a slice hash and give them a contiguous slice of
+    # - how many unique indexes are there, map each device to a slice hash and give them a contiguous slice of
     # the data loaded by that host
-    data_per_device = pipeline_size // len(unique_slices)
+    data_per_device = pipeline_size // len(unique_indexes)
     slice_hash_to_pipeline_indices = {gda_lib._hashed_index(slice_tuple): \
                                                                         slice(i*data_per_device,(i+1)*data_per_device, None) \
-                                                                          for i, slice_tuple in enumerate(unique_slices)}
+                                                                          for i, slice_tuple in enumerate(unique_indexes)}
     # pipeline indices are the local indices of the data to be loaded by the pipeline
     for device, slice_hash in device_to_slice_hash.items():
-      device_to_pipeline_indices[device] = slice_hash_to_pipeline_indices[slice_hash] 
+      device_to_local_indexes[device] = slice_hash_to_pipeline_indices[slice_hash] 
 
-  return unique_pipelines, host_to_pipeline_hash, device_to_pipeline_indices
+  return unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes
 
 
 def load_pipeline(global_data, pipeline):
@@ -246,9 +245,9 @@ def test_per_host_data_pipeline():
   We follow these steps:
 
   1. Initialise our desired GDA shape and device mesh layout
-  2. Get the slices of the GDA corresponding to each device
-  3. For each host, identify which slices it needs to load to feed it's devices
-  4. Deduplicate these slices
+  2. Get the indexes of the GDA corresponding to each device
+  3. For each host, identify which indexes it needs to load to feed it's devices
+  4. Deduplicate these indexes
   5. Load the slices (in this test, from an array - TODO: from .tfrecords)
   6. Load them into the local device buffers and wrap it as one big GDA
 
@@ -265,41 +264,43 @@ def test_per_host_data_pipeline():
   devices = jax.devices()
   host_devices_map = device_to_host(devices)
   test_mesh_layout = construct_test_mesh_32(host_devices_map)
-  # imagine these integers are host id, and the numbers are each a device
+  global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
+  # imagine these values are host id, and the numbers are each a device
   # we create four replicas, each split over two hosts
   #     00001111
   #     00001111
   #     22223333
   #     22223333
-  global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
-
+  
   # 2. Get the slices of the GDA corresponding to each device
   # returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
   #                                   (slice(6, 8, None), slice(None, None, None)),]
-  devices_to_slices = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
-
-  all_slices = [(device, devices_to_slices[device]) for device in devices]
+  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh, data_axes)
 
   # What the t5x example does here is it splits the total length of the input data array
-  # by num unique slices and assigns each slice (or 'pipeline') to a host.
+  # by num unique indicies and assigns each indices (or 'pipeline') to a host.
   # This doesn't account for the situation where multiple hosts might WANT to load the
   # same data. E.g in our case there are 4 unique slices ('pipelines'), but what we want
   # to test is each host loading the data required of it and not needing to reshard
   # during pjit. Instead, what we will do is:
 
-  # 3. Create the unique pipelines
-  unique_pipelines, host_to_pipeline_hash, device_to_pipeline_indices = create_per_host_pipeline(host_devices_map, devices_to_slices)
+  # 3. Create contiguous, unique indices representing each data pipeline
+  unique_contiguous_global_indexes, host_to_contiguous_global_index_hash, device_to_local_indexes = create_per_host_pipeline(host_devices_map, device_to_index)
+  # unique_contiguous_global_indexes: Objects representing slices like 0:4, 4:8  of the global data array
+  # host_to_contiguous_global_index_hash: which contiguous section should each host load
+  # device_to_local_indexes: of that contiguous section, which LOCAL indices go to which device
 
-  my_pipeline = unique_pipelines[host_to_pipeline_hash[jax.process_index()]]
+  # host_contiguous_indexes_to_load: which contiguous section should each host load
+  host_contiguous_indexes_to_load = unique_contiguous_global_indexes[host_to_contiguous_global_index_hash[jax.process_index()]]
 
-  # 4. Load one contiguous section from that pipeline
-  local_data = load_pipeline(global_data, my_pipeline)
+  # 4. Load that section
+  local_data = load_pipeline(global_data, host_contiguous_indexes_to_load)
 
-  # 5. Slice this up and give it to the devices
+  # 5. Slice this up using local indcies and give it to the host local devices
   device_buffers = []
   for device in jax.local_devices():
-    indices = device_to_pipeline_indices[device]
-    data = local_data[indices]
+    local_indices = device_to_local_indexes[device]
+    data = local_data[local_indices]
     device_buffers.append(jax.device_put(data, device))
 
   # # 6. Load them into the local device buffers and wrap it as one big GDA

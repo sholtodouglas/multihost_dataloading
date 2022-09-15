@@ -2,6 +2,7 @@ from os import system
 import argparse
 import subprocess
 import requests
+import time
 
 OKGREEN = '\033[92m'
 ENDC = '\033[0m'
@@ -139,12 +140,14 @@ if __name__ == "__main__":
     print("Skipping fswatch - you're already syncing")
   else:
     # create a new window, where we will launch fswatch from
+    # we want this install to be blocking, so we don't try to run fswatch till it is installed
+    output = subprocess.run(
+        f'gcloud compute tpus tpu-vm ssh {args.tpu_name} --zone {args.zone} --project {args.project} --worker {0} --command "sudo apt install fswatch"', shell=True, check=True)
+
     tmux("new-window")
     # connect to our primary host
     tmux_shell(
         f"gcloud compute tpus tpu-vm ssh {args.tpu_name} --zone {args.zone} --project {args.project} --worker {0}")
-
-    tmux_shell('sudo apt install fswatch')
 
     # create the rsync file called sync.sh
     working_destinations = ' '.join(

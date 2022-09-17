@@ -11,6 +11,7 @@ Code arranged as follows
 """
 
 from collections import defaultdict
+from curses import halfdelay
 from dataclasses import dataclass
 import os
 from typing import Any, Dict, List, NewType, Tuple
@@ -85,7 +86,7 @@ def construct_test_mesh_32() -> np.ndarray:
 
 def get_all_data_all_hosts_pipeline(
     dataset: tf.data.Dataset, global_data_shape: np.ndarray) -> tf.data.Dataset:
-  """Return the same, globally sized dataloader across all hosts."""
+  """Return the same, globally sized dataloader across all hosts. Simple & easy!"""
   return (dataset.batch(
       global_data_shape[data_dim]).repeat().as_numpy_iterator())
 
@@ -104,6 +105,14 @@ def get_next_all_data_all_hosts(
 
 
 ################################################################################
+####################### Per device data pipeline ###############################
+################################################################################
+
+# No reason to test - it is 2 lines less than per replica data pipeline, and
+# has much higher overhead potential. Base case sufficiently represented in
+# strawman, which two lines would be removed is noted below.
+
+################################################################################
 ######################## Per replica data pipeline #############################
 ################################################################################
 
@@ -117,7 +126,27 @@ class ShardInfo:
 def get_per_replica_data_pipeline(
     dataset: tf.data.Dataset, device_to_index: Dict[Device, Tuple[slice, slice]]
 ) -> Tuple[Dict[Device, ShardInfo], Dict[int, tf.data.Dataset]]:
-  """Create a tf.dataset per unique slice of data to be loaded to the host (i.e per replica)."""
+  """Create a tf.dataset per unique slice of data to be loaded to the host (i.e per replica).
+
+  Identifies what data the host wants to load for it's devices, deduplicates it - and 
+  returns a data pipeline per unique slice desired by the devices. In 'get next', it sequentially
+  loads each of these. This is simpler than the per host method, but introduces overheads from 
+  several sequential calls to a data pipeline, as opposed to a single equivalently sized call.
+
+  Returns two dicts because we only want to load each of the datasets in shard_idx_to_dataset
+  once, not once per device - so we need both the unique pipelines, and the per device mapping 
+  to them. 
+
+  + Efficiently deduplicates the data to load per host
+  + Low-medium complexity
+  - Overhead from multiple calls to tf.data
+  
+  Args:
+    dataset: tf dataset over all files
+    device_to_index: mapping of devices to GDA indices
+  Returns:
+    device_to_shard_info: Which device maps to which dataset shard idx
+    shard_idx_to_dataset: Which shard index maps to which dataset"""
 
   # get the unique set of slices into the GDA (i.e one per replica)
   # and which devices map to those
@@ -145,7 +174,9 @@ def get_per_replica_data_pipeline(
         dataset.shard(num_shards=num_shards, index=shard_info.idx).batch(
             shard_info.size).repeat().as_numpy_iterator())  # for Jax
 
-    # we only want one copy of each pipeline per host
+    # we only want one copy of each pipeline per host. To change this to 
+    # per-device, simply use a list instead of dict here - removing the
+    # if in line, and making indexing in one line les s laters.
     if shard_info.idx not in shard_idx_to_dataset:
       shard_idx_to_dataset[shard_info.idx] = sharded_dataset
 
@@ -267,7 +298,22 @@ def convert_global_indices_to_local_indices(
 def get_per_host_data_pipeline(
     dataset: tf.data.Dataset, device_to_index: Dict[Device, Tuple[slice, slice]]
 ) -> Tuple[tf.data.Dataset, Dict[Device, slice]]:
-  """Test the case where we have one data pipeline per host."""
+  """Test the case where we have one data pipeline per host.
+
+  To do this, we determine which pieces of data each host needs to feed it's devices,
+  identify the unique sets of these (which is likely < num_hosts), and then create 
+  a data pipeline for each set. 
+  
+  + No overhead from multiple pipelines per host
+  - High complexity
+  - Doesn't allow for incomplete overlap in the batches loaded by hosts
+  Args:
+    dataset: tf dataset over all files
+    device_to_index: mapping of devices to GDA indices
+  Returns:
+    sharded_dataset: Correct dataset to load for this host
+    host_local_indices: indices for just the data loaded by the host's pipeline
+"""
 
   host_to_devices = defaultdict(list)
   for d in jax.devices():
@@ -308,15 +354,32 @@ def get_next_per_host(
 
 
 ################################################################################
-########################### Common code ########################################
+### Shard data parallelism over devices, reshard inside pjit  (pax method) #####
 ################################################################################
 
 
+################################################################################
+########################## Use tensorstore #####################################
+################################################################################
+
+# TODO(sholto): ^^
+
+################################################################################
+###################### Load on one, distribute over dcn ########################
+################################################################################
+
+# TODO(sholto): ^^
+
+################################################################################
+########################### Common code ########################################
+################################################################################
+
 def test_case(method: str):
   """Generic code to set up the tests of each pipeline method."""
-  # 1. Initialise our desired GDA shape and deivce mesh layout
+  print(f'----------- Now testing {method} method ------------------------')
+  # Initialise our desired GDA shape and device mesh layout
   # Construct global data
-  global_data_shape = (8, 4)
+  global_data_shape = (32, 4)
   data_axes = P('data', None)
   # Create our device mesh - this function arranges a 4 hosts/32 devices
   # to allow us to test the general case
@@ -329,7 +392,7 @@ def test_case(method: str):
   #     22223333
   #     22223333
 
-  # 2. Get the slices of the GDA corresponding to each device (globally)
+  # Get the slices of the GDA corresponding to each device (globally)
   # returns [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
   #                              (slice(6, 8, None), slice(None, None, None)),]
   device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
@@ -359,46 +422,51 @@ def test_case(method: str):
   else:
     raise NotImplementedError
 
-  # # 6. Load them into the local device buffers and wrap it as one big GDA
+  # Load them into the local device buffers and wrap it as one big GDA
   gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes,
                           device_buffers)
 
-  print(gda.local_data(0))
-  print(gda.local_data(4))
+  print(f'First device: \n {gda.local_data(0)}')
+  print(f'Fifth device: \n {gda.local_data(4)}')
 
-  test_gda_output(global_data, gda, method)
+  test_gda_output(global_data, gda, method, test_mesh_layout)
 
 
 def test_gda_output(global_data: np.ndarray, gda: GlobalDeviceArray,
-                    method: str):
-  """Compares against a known GDA arrangement."""
+                    method: str, test_mesh_layout: np.ndarray):
+  """Compares against a known GDA arrangement - testmesh32"""
+
+  replicas = test_mesh_layout.shape[data_dim]
+  half = global_data.shape[data_dim]//2
+  quarter = half//2
 
   if method == 'per_replica':
     # Per host re-indexes s.t. there is only one tf.data shard per host
     if jax.process_index() == 0 or jax.process_index() == 1:
-      assert (gda.local_data(0) == global_data[0::4]).all()
-      assert (gda.local_data(4) == global_data[1::4]).all()
+      assert (gda.local_data(0) == global_data[0::replicas]).all()
+      assert (gda.local_data(4) == global_data[1::replicas]).all()
     if jax.process_index() == 2 or jax.process_index() == 3:
-      assert (gda.local_data(0) == global_data[2::4]).all()
-      assert (gda.local_data(4) == global_data[3::4]).all()
+      assert (gda.local_data(0) == global_data[2::replicas]).all()
+      assert (gda.local_data(4) == global_data[3::replicas]).all()
 
   elif method == 'per_host':
     # Per host re-indexes s.t. there is only one tf.data shard per host
+    unique_shards = 2 # custom for the testmesh layout
     if jax.process_index() == 0 or jax.process_index() == 1:
-      assert (gda.local_data(0) == global_data[0::2][:2]).all()
-      assert (gda.local_data(4) == global_data[0::2][2:]).all()
+      assert (gda.local_data(0) == global_data[0::unique_shards][:quarter]).all()
+      assert (gda.local_data(4) == global_data[0::unique_shards][quarter:]).all()
     if jax.process_index() == 2 or jax.process_index() == 3:
-      assert (gda.local_data(0) == global_data[1::2][:2]).all()
-      assert (gda.local_data(4) == global_data[1::2][2:]).all()
+      assert (gda.local_data(0) == global_data[1::unique_shards][:quarter]).all()
+      assert (gda.local_data(4) == global_data[1::unique_shards][quarter:]).all()
 
   else:
 
     if jax.process_index() == 0 or jax.process_index() == 1:
-      assert (gda.local_data(0) == global_data[0:4][:2]).all()
-      assert (gda.local_data(4) == global_data[0:4][2:]).all()
+      assert (gda.local_data(0) == global_data[0:half][:quarter]).all()
+      assert (gda.local_data(4) == global_data[0:half][quarter:]).all()
     if jax.process_index() == 2 or jax.process_index() == 3:
-      assert (gda.local_data(0) == global_data[4:][:2]).all()
-      assert (gda.local_data(4) == global_data[4:][2:]).all()
+      assert (gda.local_data(0) == global_data[half:][:quarter]).all()
+      assert (gda.local_data(4) == global_data[half:][quarter:]).all()
 
   print(f"Method: {method} '\u2713'")
 

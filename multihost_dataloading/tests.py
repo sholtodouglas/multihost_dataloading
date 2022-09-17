@@ -4,10 +4,11 @@ Code arranged as follows
 
 - Initalisation code
 - Per test case unique code
-  - Per device
-  - Per replica
-  - Per host
-- Test harness"""
+  - For each, we have a
+    - 'get_pipeline...' method which does setup
+    - 'get next...' which gets the next batch
+- Test harness
+"""
 
 from collections import defaultdict
 from dataclasses import dataclass
@@ -76,6 +77,30 @@ def construct_test_mesh_32() -> np.ndarray:
   ])
 
   return test_mesh_layout
+
+################################################################################
+################### (Strawman) Load all data on all hosts ######################
+################################################################################
+
+
+def get_all_data_all_hosts_pipeline(
+    dataset: tf.data.Dataset, global_data_shape: np.ndarray) -> tf.data.Dataset:
+  """Return the same, globally sized dataloader across all hosts."""
+  return (dataset.batch(
+      global_data_shape[data_dim]).repeat().as_numpy_iterator())
+
+
+def get_next_all_data_all_hosts(
+    dataset, device_to_index: Dict[Device, Tuple[slice,
+                                                 slice]]) -> List[DeviceBuffer]:
+  """Fill device buffers with appropriate slice of the globally identical data."""
+  batch = dataset.next()
+  # iterate over the local devices, getting the correct slice
+  device_buffers = [
+      jax.device_put(batch[device_to_index[device]], device)
+      for device in jax.local_devices()
+  ]
+  return device_buffers
 
 
 ################################################################################
@@ -313,7 +338,11 @@ def test_case(method: str):
   global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
   dataset = tf.data.Dataset.from_tensor_slices(global_data)
 
-  if method == 'per_replica':
+  if method == 'all_data_all_hosts':
+    dataset = get_all_data_all_hosts_pipeline(dataset, global_data_shape)
+    device_buffers = get_next_all_data_all_hosts(dataset, device_to_index)
+
+  elif method == 'per_replica':
     # get the mapping of devices to data shards, and the unique set of shard
     # indices with their corresponding datasets
     device_to_shard_info, shard_idx_to_dataset = get_per_replica_data_pipeline(
@@ -363,11 +392,17 @@ def test_gda_output(global_data: np.ndarray, gda: GlobalDeviceArray,
       assert (gda.local_data(4) == global_data[1::2][2:]).all()
 
   else:
-    raise NotImplementedError
+
+    if jax.process_index() == 0 or jax.process_index() == 1:
+      assert (gda.local_data(0) == global_data[0:4][:2]).all()
+      assert (gda.local_data(4) == global_data[0:4][2:]).all()
+    if jax.process_index() == 2 or jax.process_index() == 3:
+      assert (gda.local_data(0) == global_data[4:][:2]).all()
+      assert (gda.local_data(4) == global_data[4:][2:]).all()
 
   print(f"Method: {method} '\u2713'")
 
-
+test_case('all_data_all_hosts')
 test_case('per_host')
 test_case('per_replica')
 

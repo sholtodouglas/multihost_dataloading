@@ -8,42 +8,20 @@ import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Tuple, NewType, Any, List, Dict
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # disable CUDA not found etc warnings
 import tensorflow as tf
 
+# TODO: Typing - e.g. for TfrtTpuDevices
 Device = NewType('Device', Any)  # TODO: update to the redef in t5x
-Indexes = NewType('Device', Tuple[slice, slice])
+DeviceBuffer = NewType('DeviceBuffer', Any)  # TODO: update to the redef in t5x
 
 # make pjit output GDAs
 jax.config.update('jax_parallel_functions_output_gda', True)
 
-# TODO: Typing - e.g. for TfrtTpuDevices
+data_dim = 0 # assume data dimension is the first 
 
-_hashed_set_of_indexes = lambda indexes: hash(
-    np.array([(v.start, v.stop) for idx in indexes for v in idx]).tobytes())
-
-
-def get_host_to_devices(devices: List[Device]) -> Dict[int, List[Device]]:
-  """Gets mapping host to list of all devices.
-
-  Use this when we need to be able to arrange all devices by host
-  rather than accessing the devices on a host itself.
-
-  Args:
-    devices: [TpuDevice(id=0, process_index=0, coords=(0,0,0),
-      core_on_chip=0),..]
-
-  Returns:
-    host_to_devices: {host_id: [device_1, device_2],..}
-  """
-
-  host_to_devices = defaultdict(list)
-  for d in devices:
-    host_to_devices[d.host_id].append(d)  # default dict so no need to check
-  return host_to_devices
-
-
-# TODO: Check this function and dehackify it
-def construct_test_mesh_32(host_to_devices: Dict[int, List[Device]]):
+def construct_test_mesh_32() -> np.ndarray:
   """Constructs a non-standard mesh layout to test all cases.
 
   By default, when we reshape a 32 (i.e. 4 hosts, 8 devices each) slice to (data, model) 
@@ -65,9 +43,11 @@ def construct_test_mesh_32(host_to_devices: Dict[int, List[Device]]):
       22223333
       22223333
 
-  Args:
-    host_to_devices: {host_id: [device_1, device_2],..}
+  Returns:
+    test_mesh_layout: np.ndarray of Device objects
   """
+  host_to_devices = defaultdict(list)
+  for d in jax.devices(): host_to_devices[d.host_id].append(d)  # default dict so no need to check
 
   assert sum([len(devices) for _, devices in host_to_devices.items()]) == 32
 
@@ -80,288 +60,80 @@ def construct_test_mesh_32(host_to_devices: Dict[int, List[Device]]):
 
   return test_mesh_layout
 
-
-def deduplicate_indexes(local_indexes: List[Tuple[Device, Tuple[slice,
-                                                                slice]]]):
-  """Returns the unique set of indexes we need to load locally
-  And the mapping of device to those indexes (so we only need to
-  lookup the data loaded for that index, rather than loading it 
-  once per device).
-  """
-  index_hash_to_index_unique = {}
-  local_device_to_index_hash = {}
-
-  for (device, index_tuple) in local_indexes:
-    index_hash = gda_lib._hashed_index(index_tuple)
-    index_hash_to_index_unique[index_hash] = index_tuple  # any entry fine
-    local_device_to_index_hash[device] = index_hash
-
-  return index_hash_to_index_unique, local_device_to_index_hash
-
-
-def load_indices_to_host(global_data, pipelines: Dict[int, Tuple[slice, slice]]):
-  """Load the data for a given set of indices to the GDA to the host.
-  For the moment just load from an array. TODO: Load from tf.data.
-  """
-  hash_to_loaded_indexes = {}
-  for hash, indexes in pipelines.items():
-    hash_to_loaded_indexes[hash] = global_data[indexes]
-  return hash_to_loaded_indexes
-
 ################################################################################
 ######################## Per replica data pipeline #############################
 ################################################################################
 
-def test_per_replica_data_pipeline():
-  '''
-  We follow these steps:
-  1. Initialise our desired GDA shape and device mesh layout
-  2. Get the indexes of the GDA corresponding to each device
-  3. For each host, identify which indexes it needs to load to feed it's devices
-  4. Deduplicate these indexes
-  5. Load the indexes (in this test, from an array - TODO: from .tfrecords)
-  6. Load them into the local device buffers and wrap it as one big GDA
-  '''
+@dataclass
+class shardInfo:
+  idx: int
+  size: int 
 
+def get_per_replica_data_pipeline(dataset: tf.data.Dataset, 
+                device_to_index: Dict[Device, Tuple[slice, slice]]) -> Tuple[Dict[Device, shardInfo], Dict[int, tf.data.Dataset]]:
+  '''Create a tf.dataset per unique slice of data to be loaded to the host (i.e per replica).'''
 
-  # 1. Initialise our desired GDA shape and deivce mesh layout
-  # Construct global data
-  global_data_shape = (8, 4)
-  global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
-  data_axes = P('data', None)
-  # Create our device mesh - this function arranges a 4 hosts/32 devices
-  # to allow us to test the general case
-  devices = jax.devices()
-  host_to_devices = get_host_to_devices(devices)
-  test_mesh_layout = construct_test_mesh_32(host_to_devices)
-  # imagine these integers are host id, and the numbers are each a device
-  # we create four replicas, each split over two hosts
-  #     00001111
-  #     00001111
-  #     22223333
-  #     22223333
-  global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
+  # get the unique set of slices into the GDA (i.e one per replica)
+  # and which devices map to those
+  index_hash_to_shard_idx = {} # int, int
+  device_to_shard_info = {} # device, (int, 
+  for (device, index_tuple) in device_to_index.items():
+    index_hash = gda_lib._hashed_index(index_tuple)
 
-  # 2. Get the indexes of the GDA corresponding to each device
-  # returns [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
-  #                               (slice(6, 8, None), slice(None, None, None)),]
-  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
-                                              data_axes)
+    if index_hash not in index_hash_to_shard_idx:
+      index_hash_to_shard_idx[index_hash] = len(index_hash_to_shard_idx)
 
-  # 3. For each host, get indexes of the GDA it needs to feed it's local devices
-  #       data_dim          model_dim (replicated)
-  # [((slice(0, 2, None), slice(None, None, None)),...]
-  local_indexes = [
-      (device, device_to_index[device]) for device in jax.local_devices()
-  ]
-  # 4. Deduplicate indexes locally - and pair each device with a hash to look
-  #    up the data to be loaded by the host
-  index_hash_to_index_unique, local_device_to_index_hash = deduplicate_indexes(
-      local_indexes)
+    indices_size = index_tuple[data_dim].stop - index_tuple[data_dim].start
+    device_to_shard_info[device] = shardInfo(index_hash_to_shard_idx[index_hash], indices_size)
 
-  # Below here is where you would loop
-  #  5. Load the slices to the host  
-  hash_to_loaded_indexes = load_indices_to_host(global_data, index_hash_to_index_unique)
+  num_shards = len(index_hash_to_shard_idx)
+  
+  # For each host, get the dataset shards for it's local devices
+  # and map the devices to those shards. 
+  shard_idx_to_dataset = {}
+  for device in jax.local_devices():
+    shard_info = device_to_shard_info[device]
 
-  # 6. Load them into the local device buffers and wrap it as one big GDA
+    sharded_dataset = iter(dataset
+                        .shard(num_shards=num_shards,index=shard_info.idx)
+                        .batch(shard_info.size)
+                        .repeat()
+                        .as_numpy_iterator()) # for Jax
+    
+    # we only want one copy of each pipeline per host
+    if shard_info.idx not in shard_idx_to_dataset:
+      shard_idx_to_dataset[shard_info.idx] = sharded_dataset
+
+  return device_to_shard_info, shard_idx_to_dataset
+
+def get_next_per_replica(device_to_shard_info: Dict[Device, shardInfo], shard_idx_to_dataset: Dict[int, tf.data.Dataset]) -> List[DeviceBuffer]:
+  # load one iteration of each of those datasets
+  shard_idx_to_loaded_data = {idx: dataset.next() for idx, dataset in shard_idx_to_dataset.items()}
+  # iterate over the local devices, getting the copy of preloaded data
   device_buffers = []
-  for device, index_hash in local_device_to_index_hash.items():
-    host_data = hash_to_loaded_indexes[index_hash]
-    device_buffers.append(jax.device_put(host_data, device))
-
-  gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes,
-                          device_buffers)
-
-  print(gda.local_data(0))
-  print(gda.local_data(4))
-
-  expected = np.split(global_data, 4, axis=0)  # TODO: more general
-  if jax.process_index() == 0 or jax.process_index() == 1:
-    assert (gda.local_data(0) == expected[0]).all()
-    assert (gda.local_data(4) == expected[1]).all()
-  if jax.process_index() == 2 or jax.process_index() == 3:
-    assert (gda.local_data(0) == expected[2]).all()
-    assert (gda.local_data(4) == expected[3]).all()
-
-
-  print("Option 3 '\u2713'")
-
+  for device in jax.local_devices():
+    data_shard_info = device_to_shard_info[device]
+    data = shard_idx_to_loaded_data[data_shard_info.idx]
+    device_buffers.append(jax.device_put(data, device))
+  
+  return device_buffers
 ################################################################################
 ######################## Per host data pipeline ################################
 ################################################################################
 
+_hashed_set_of_indexes = lambda indexes: hash(
+    np.array([(v.start, v.stop) for idx in indexes for v in idx]).tobytes())
 
-@dataclass
-class Pipeline():
-  hash: int
-  size: int  # contiguous length
-  contiguous_indices: Tuple[slice, slice]
-
-
-def create_per_host_pipeline(host_to_devices: Dict[int, List[Device]],
-                             device_to_index: Dict[Device, Tuple[slice,
-                                                                 slice]]):
-  '''
-  1. Get which sets of indices of data each host needs to feed its devices
-  2. Determine how many unique sets of these indices there are (e.g. in our case
-      there are 2)
-  3. Assign each a contiguous section of the data = to it's length (this accounts
-      for if they were previosuly non-contiguous)
-  4. Determine the local device's indexes into this contiguous section for each host
-      
-  NOTE: This does not allow for incomplete overlap of examples between hosts. 
-  It allows them to have the same examples.
-
-  Returns:
-    hash_to_unique_pipeline: Pipelines representing slices like 0:4, 4:8 of the
-    global data array - eachshould have a unique tf.data pipeline set up.
-    host_to_pipeline_hash: Which pipeline should each host use to load it's data
-    device_to_local_indexes: Of the data loaded by that pipeline, which local 
-    indices go to which device
-
-  '''
-  hash_to_unique_pipeline = {int: Pipeline}
-  host_to_pipeline_hash = {int: int}
-  device_to_local_indexes = {Device: Tuple[slice, slice]}
-  running_index = 0
-  for host_id, host_devices in host_to_devices.items():
-    #  [((slice(0, 2, None), slice(None, None, None)),...]
-    host_device_to_global_indexes = [
-        (device, device_to_index[device]) for device in host_devices
-    ]
-    # deduplicate these
-    index_hash_to_indexes_unique, device_to_index_hash = deduplicate_indexes(
-        host_device_to_global_indexes)
-    unique_indexes = [v for _, v in index_hash_to_indexes_unique.items()]
-    # hash the set of indices for this host
-    pipeline_hash = _hashed_set_of_indexes(unique_indexes)
-    host_to_pipeline_hash[host_id] = pipeline_hash
-    pipeline_size = get_total_length_of_unique_indexes(unique_indexes)
-    if pipeline_hash not in hash_to_unique_pipeline:
-      # No model parallel slicing at the moment
-      indices = (slice(running_index, running_index + pipeline_size,
-                       None), slice(None, None, None))
-      running_index += pipeline_size
-      pipeline = Pipeline(pipeline_hash, pipeline_size, indices)
-      hash_to_unique_pipeline[pipeline_hash] = pipeline
-
-    # within a host, we do the same - how many unique indexes are there,
-    # map each device to a index hash and give them a subsection of the data
-    # loaded by that host
-    data_per_device = pipeline_size // len(unique_indexes)
-    index_hash_to_pipeline_indices = {
-        gda_lib._hashed_index(index_tuple):
-        slice(i * data_per_device, (i + 1) * data_per_device, None)
-        for i, index_tuple in enumerate(unique_indexes)
-    }
-    # pipeline indices are the local indices of the data to be loaded by the pipeline
-    for local_device, index_hash in device_to_index_hash.items():
-      device_to_local_indexes[local_device] = index_hash_to_pipeline_indices[
-          index_hash]
-
-  return hash_to_unique_pipeline, host_to_pipeline_hash, device_to_local_indexes
-
-
-def test_per_host_data_pipeline():
-  """Test the case where we have one data pipeline per host."""
-
-  # 1. Initialise our desired GDA shape and deivce mesh layout
-  # Construct global data
-  global_data_shape = (8, 4)
-  global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
-  data_axes = P('data', None)
-  # Create our device mesh - this function arranges a 4 hosts/32 devices
-  # to allow us to test the general case
-  devices = jax.devices()
-  host_to_devices = get_host_to_devices(devices)
-  test_mesh_layout = construct_test_mesh_32(host_to_devices)
-  global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
-  # imagine these values are host id, and the numbers are each a device
-  # we create four replicas, each split over two hosts
-  #     00001111
-  #     00001111
-  #     22223333
-  #     22223333
-
-  # 2. Get the slices of the GDA corresponding to each device (globally)
-  # returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
-  #                                   (slice(6, 8, None), slice(None, None, None)),]
-  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
-                                              data_axes)
-
-  # What the t5x example does here is it splits the total length of the input
-  # data array by num unique indicies and assigns each indices (or 'pipeline')
-  # to a host. This doesn't account for the situation where multiple hosts might
-  # WANT to load the same data. E.g in our case there are 4 unique slices
-  # ('pipelines'), but what we want to test is each host loading the data
-  # required of it and not needing to reshard during pjit. Instead, we
-
-  # 3. Remap the indices each host should load to one contiguous set per host
-  hash_to_unique_pipeline, host_to_pipeline_hash, device_to_local_indexes = create_per_host_pipeline(
-      host_to_devices, device_to_index)
-  # hash_to_unique_pipeline: Pipelines representing slices like 0:4, 4:8  of the
-  # global data array - each  should have a unique tf.data pipeline set up.
-  # host_to_pipeline_hash: Which pipeline should each host use to load it's data
-  # device_to_local_indexes: Of the data loaded by that pipeline, which local
-  # indices go to which device
-
-  # host_pipeline_to_load: which contiguous section should each host load
-  host_pipeline_to_load = hash_to_unique_pipeline[host_to_pipeline_hash[
-      jax.process_index()]]
-
-  # End setup - begin iteration. 
-  # 4. Load that section TODO: replace this with tf.data pipeline load
-  local_data = global_data[host_pipeline_to_load.contiguous_indices] 
-
-  # 5. Slice this up using local indices and give it to the host local devices
-  device_buffers = []
-  for device in jax.local_devices():
-    local_indices = device_to_local_indexes[device]
-    data = local_data[local_indices]
-    device_buffers.append(jax.device_put(data, device))
-
-  # # 6. Load them into the local device buffers and wrap it as one big GDA
-  gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes,
-                          device_buffers)
-  # local_shards = [shard.data for shard in gda.local_shards]
-
-  print(gda.local_data(0))
-  print(gda.local_data(4))
-  
-  expected = np.split(global_data, 4, axis=0)  # TODO: more general
-
-  if jax.process_index() == 0 or jax.process_index() == 1:
-    assert (gda.local_data(0) == expected[0]).all()
-    assert (gda.local_data(4) == expected[1]).all()
-  if jax.process_index() == 2 or jax.process_index() == 3:
-    assert (gda.local_data(0) == expected[2]).all()
-    assert (gda.local_data(4) == expected[3]).all()
-
-  print("Option 4 '\u2713'")
-
-
-# test_per_replica_data_pipeline()
-# test_per_host_data_pipeline()
-
-# Note: tests which set up one host to have multiple processes
-#  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py
-
-
-############################################################################################################
-############################################################################################################
-############################################################################################################
-def get_total_length_of_unique_indexes(unique_indexes):
+def get_total_length_of_unique_indexes(unique_indexes: List[Tuple[slice, slice]]) -> int:
   size = 0
   for (data, _) in unique_indexes:
     size += data.stop - data.start
   return size
   
-def deduplicate_indexesv2(local_indexes: List[Tuple[Device, Tuple[slice,
-                                                                slice]]]):
-  """Returns the unique set of indexes we need to load locally
-  And the mapping of device to those indexes (so we only need to
-  lookup the data loaded for that index, rather than loading it 
-  once per device).
+def deduplicate_indexes(local_indexes: List[Tuple[Device, Tuple[slice,
+                                                                slice]]]) -> Dict[int, Tuple[slice, slice]]:
+  """Returns the unique set of indexes we need to load locally.
+  Uses the indices hash to check for sameness.
   """
   unique_indices = {} # hash, indices
 
@@ -374,8 +146,8 @@ def deduplicate_indexesv2(local_indexes: List[Tuple[Device, Tuple[slice,
 
 def get_unique_shards(host_to_devices: Dict[int, List[Device]],
                              device_to_index: Dict[Device, Tuple[slice,
-                                                                 slice]]):
-  '''Looks at the sets of data each host needs, deduplicates, assigns a shard.'''
+                                                                 slice]]) -> Tuple[Dict[int, int], Dict[int, int]]:
+  '''Looks at the sets of data each host needs, deduplicates, assigns a shard to the set.'''
 
   host_to_dataset_shard = {} # [process_id, index]
   dataset_shard_hash_to_index = {} # [hash, index]
@@ -387,7 +159,7 @@ def get_unique_shards(host_to_devices: Dict[int, List[Device]],
         (device, device_to_index[device]) for device in host_devices
     ]
     # deduplicate these
-    idx_hash_to_unique_indices= deduplicate_indexesv2(host_device_to_global_indexes)
+    idx_hash_to_unique_indices= deduplicate_indexes(host_device_to_global_indexes)
 
     # hash the set of indices for this host
     pipeline_hash = _hashed_set_of_indexes([idx for _, idx in idx_hash_to_unique_indices.items()])
@@ -404,7 +176,7 @@ def get_unique_shards(host_to_devices: Dict[int, List[Device]],
   return host_to_dataset_shard, num_unique_shards
 
 def convert_global_indices_to_local_indices(device_to_index: Dict[Device, Tuple[slice,
-                                                                 slice]]):
+                                                                 slice]]) -> Tuple[Dict[Device, slice], int]:
   '''Converts global GDA indices for each device to local indices of host loaded data.'''
   device_index_hash_to_local_index = {} # hash, [slice, slice]
   device_to_local_indices = {} # device, [slice, slice]
@@ -420,7 +192,7 @@ def convert_global_indices_to_local_indices(device_to_index: Dict[Device, Tuple[
       # who match that global slice hash
 
       # TODO: No magic indexing
-      size = global_index_tuple[0].stop - global_index_tuple[0].start
+      size = global_index_tuple[data_dim].stop - global_index_tuple[data_dim].start
       local_slice = slice(total_data_to_load, total_data_to_load+size, None)
       device_index_hash_to_local_index[global_index_hash] = local_slice
       total_data_to_load += size
@@ -430,9 +202,48 @@ def convert_global_indices_to_local_indices(device_to_index: Dict[Device, Tuple[
   return device_to_local_indices, total_data_to_load
 
 
-def test_per_host_data_pipelinev2():
+def get_per_host_data_pipeline(dataset: tf.data.Dataset, device_to_index: Dict[Device, Tuple[slice, slice]]) -> Tuple[tf.data.Dataset, Dict[Device, slice]]:
   """Test the case where we have one data pipeline per host."""
 
+  host_to_devices = defaultdict(list)
+  for d in jax.devices(): host_to_devices[d.host_id].append(d)  # default dict so no need to check
+  # Now, we want to find the number of unique (per host) dataset shards which should be loaded
+  # and assign each host to their shard.
+  # TODO: Check if this is even necessary, or we could get as good results with interleave
+  host_to_dataset_shard, num_shards = get_unique_shards(host_to_devices, device_to_index)
+  # And assign devices indices into the data to be loaded by the host
+  host_local_indices, total_data_to_load = convert_global_indices_to_local_indices(device_to_index)
+
+  # Create the data pipeline
+  local_data_shard_index = host_to_dataset_shard[jax.process_index()]
+  sharded_dataset = iter(dataset
+                        .shard(num_shards=num_shards,index=local_data_shard_index)
+                        .batch(total_data_to_load)
+                        .repeat()
+                        .as_numpy_iterator()) # for Jax
+
+  return sharded_dataset, host_local_indices 
+
+def get_next_per_host(sharded_dataset: tf.data.Dataset, host_local_indices: Dict[Device, slice]) -> List[DeviceBuffer]:
+    
+    # load a single pipeline for the entire host
+    local_data = sharded_dataset.next()
+    # Slice this up using local indices and give it to the host local devices
+    device_buffers = []
+    for device in jax.local_devices():
+      local_indices = host_local_indices[device]
+      data = local_data[local_indices]
+      device_buffers.append(jax.device_put(data, device))
+    
+    return device_buffers
+
+
+################################################################################
+######################## Universal code ########################################
+################################################################################
+
+
+def test_case(method: str):
   # 1. Initialise our desired GDA shape and deivce mesh layout
   # Construct global data
   global_data_shape = (8, 4)
@@ -440,9 +251,7 @@ def test_per_host_data_pipelinev2():
   data_axes = P('data', None)
   # Create our device mesh - this function arranges a 4 hosts/32 devices
   # to allow us to test the general case
-  devices = jax.devices()
-  host_to_devices = get_host_to_devices(devices)
-  test_mesh_layout = construct_test_mesh_32(host_to_devices)
+  test_mesh_layout = construct_test_mesh_32()
   global_mesh = Mesh(test_mesh_layout, ('data', 'model'))
   # imagine these values are host id, and the numbers are each a device
   # we create four replicas, each split over two hosts
@@ -455,51 +264,65 @@ def test_per_host_data_pipelinev2():
   # returns e.g. [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
   #                                   (slice(6, 8, None), slice(None, None, None)),]
   device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
-                                              data_axes)
+                                              data_axes)                                 
+  dataset = tf.data.Dataset.from_tensor_slices(global_data)
 
-  # Now, we want to find the number of unique (per host) dataset shards which should be loaded
-  # and assign each host to their shard.
-  # TODO: Check if this is even necessary, or we could get as good results with interleave
-  host_to_dataset_shard, num_shards = get_unique_shards(host_to_devices, device_to_index)
-  # And assign devices indices into the data to be loaded by the host
-  device_to_local_indices, total_data_to_load = convert_global_indices_to_local_indices(device_to_index)
+  if method == 'per_replica':
+    # get the mapping of devices to data shards, and the unique set of shard indices with their 
+    # corresponding datasets
+    device_to_shard_info, shard_idx_to_dataset = get_per_replica_data_pipeline(dataset, device_to_index)
+    device_buffers = get_next_per_replica(device_to_shard_info, shard_idx_to_dataset)
+    
+  elif method == 'per_host':
+    # returns a single tf.data shard per host, and how the local devices index into this
+    sharded_dataset, host_local_indices = get_per_host_data_pipeline(dataset, device_to_index)
+    device_buffers = get_next_per_host(sharded_dataset, host_local_indices)
 
-  # Create the data pipeline
-  local_data_shard_index = host_to_dataset_shard[jax.process_index()]
-  data_pipeline = iter(tf.data.Dataset.from_tensor_slices(global_data)
-                        .shard(num_shards=num_shards,index=local_data_shard_index)
-                        .batch(total_data_to_load)
-                        .repeat()
-                        .as_numpy_iterator()) # for Jax
+  else: 
+    raise NotImplementedError
 
   ##################################  End setup, start iteration ################################
-
-  # load local data
-  local_data = data_pipeline.next()
-  # 5. Slice this up using local indices and give it to the host local devices
-  device_buffers = []
-  for device in jax.local_devices():
-    local_indices = device_to_local_indices[device]
-    data = local_data[local_indices]
-    device_buffers.append(jax.device_put(data, device))
 
   # # 6. Load them into the local device buffers and wrap it as one big GDA
   gda = GlobalDeviceArray(global_data_shape, global_mesh, data_axes,
                           device_buffers)
-  # local_shards = [shard.data for shard in gda.local_shards]
 
   print(gda.local_data(0))
   print(gda.local_data(4))
-  
-  expected = np.split(global_data, 4, axis=0)  # TODO: more general
 
-  if jax.process_index() == 0 or jax.process_index() == 1:
-    assert (gda.local_data(0) == expected[0]).all()
-    assert (gda.local_data(4) == expected[1]).all()
-  if jax.process_index() == 2 or jax.process_index() == 3:
-    assert (gda.local_data(0) == expected[2]).all()
-    assert (gda.local_data(4) == expected[3]).all()
+  test_gda_output(global_data, gda, method)
 
-  print("Option 4 '\u2713'")
+def test_gda_output(global_data: np.ndarray, gda: GlobalDeviceArray, method: str):
+  if method == 'per_replica':
+    # Per host re-indexes s.t. there is only one tf.data shard per host 
+    # TODO: Fix magic numbers
+    if jax.process_index() == 0 or jax.process_index() == 1:
+      assert (gda.local_data(0) == global_data[0::4]).all()
+      assert (gda.local_data(4) == global_data[1::4]).all()
+    if jax.process_index() == 2 or jax.process_index() == 3:
+      assert (gda.local_data(0) == global_data[2::4]).all()
+      assert (gda.local_data(4) == global_data[3::4]).all()
+    
+  elif method == 'per_host':
+    # Per host re-indexes s.t. there is only one tf.data shard per host 
+    # TODO: Fix magic numbers
+    if jax.process_index() == 0 or jax.process_index() == 1:
+      assert (gda.local_data(0) == global_data[0::2][:2]).all()
+      assert (gda.local_data(4) == global_data[0::2][2:]).all()
+    if jax.process_index() == 2 or jax.process_index() == 3:
+      assert (gda.local_data(0) == global_data[1::2][:2]).all()
+      assert (gda.local_data(4) == global_data[1::2][2:]).all()
+    
+  else:
+    raise NotImplementedError
+    
 
-test_per_host_data_pipelinev2()
+  print(f"Method: {method} '\u2713'")
+
+
+test_case('per_host')
+test_case('per_replica')
+
+
+# Note: tests which set up one host to have multiple processes
+#  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

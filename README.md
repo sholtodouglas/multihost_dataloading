@@ -12,13 +12,27 @@ pip install -e .
 python3 multihost_dataloading/tests.py
 ```
 
+The following diagrams are laid at as below - testing the fully general case with a 32 device pod - where we have both replicas shared across devices, and multiple replicas per device. 
+
+![image](assets/layout.png)
+
 # Methods tested
 
+
+
 ## All data loaded by all hosts (strawman)
+
+![image](assets/strawman.png)
 
 
 ## Per replica data pipeline
 
+![image](assets/per_replica.png)
+
 ## Per host data pipeline
 
+![image](assets/per_host.png)
+
 ## Data is loaded fully sharded across all devices, and resharded inside pjit (Pax method)
+
+![image](assets/pax.png)

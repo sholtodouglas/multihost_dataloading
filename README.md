@@ -1,6 +1,8 @@
 # multihost_dataloading
 Experimenting with how best to do multi-host dataloading. Once we determine a recommended option, we will likely upstream it to jax's GDA lib as a function which takes a tf.data.Dataset and a GDA definition, and returns an efficient iterator that returns the desired GDA.
 
+> **Note**
+> At present, running this requires using a pod-slice. Set this up using the [following workflow and provided setup script.](https://github.com/sholtodouglas/multihost_dataloading/blob/main/workflow_setup/cloud_tpu_workflow.md)
 
 Install with the following
 

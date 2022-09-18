@@ -16,6 +16,12 @@ python3 multihost_dataloading/tests.py
 
 The following diagrams are laid at as below - testing the fully general case with a 32 device pod - where we have both replicas shared across devices, and multiple replicas per device. 
 
+### Progres
+- [x] Implement main methods and verify correctness
+- [ ] Benchmark each method with different data volumes (text, images, video)
+- [ ] Implement extra options (using tensorstore and DCN)
+- [ ] Upstream best option to GDA lib
+
 ![image](assets/layout.png)
 
 # Methods tested

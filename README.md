@@ -12,7 +12,13 @@ pip install -e .
 python3 multihost_dataloading/tests.py
 ```
 
+The following diagrams are laid at as below - testing the fully general case with a 32 device pod - where we have both replicas shared across devices, and multiple replicas per device. 
+
+![image](assets/layout.png)
+
 # Methods tested
+
+
 
 ## All data loaded by all hosts (strawman)
 

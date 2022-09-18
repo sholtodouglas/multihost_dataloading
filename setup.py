@@ -13,7 +13,7 @@ setuptools.setup(
     description='multihost_dataloading examples',
     author='Google Inc.',
     author_email='no-reply@google.com',
-    url='TODO:replace when updated', # TODO
+    url='TODO:replace when updated',  # TODO
     license='Apache 2.0',
     packages=setuptools.find_packages(),
     scripts=[],
@@ -36,9 +36,9 @@ setuptools.setup(
     keywords='data machinelearning',
 )
 
-    # extras_require={
-    #     'gcp': [
-    #         'gevent', 'google-api-python-client', 'google-compute-engine',
-    #         'google-cloud-storage', 'oauth2client'
-    #     ],
-    # },
+# extras_require={
+#     'gcp': [
+#         'gevent', 'google-api-python-client', 'google-compute-engine',
+#         'google-cloud-storage', 'oauth2client'
+#     ],
+# },

@@ -22,9 +22,17 @@ The following diagrams are laid at as below - testing the fully general case wit
 
 ## All data loaded by all hosts (strawman)
 
+![image](assets/strawman.png)
+
 
 ## Per replica data pipeline
 
+![image](assets/per_replica.png)
+
 ## Per host data pipeline
 
+![image](assets/per_host.png)
+
 ## Data is loaded fully sharded across all devices, and resharded inside pjit (Pax method)
+
+![image](assets/pax.png)

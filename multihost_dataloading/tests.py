@@ -6,7 +6,7 @@ Code arranged as follows
 - Per test case unique code
   - For each, we have a
     - 'get_pipeline...' method which does setup
-    - 'get next...' which gets the next batch
+    - 'get next...' which gets the next batch # TODO: Return this as a fn from the first fn
 - Test harness
 """
 
@@ -42,11 +42,11 @@ def construct_test_mesh_32() -> np.ndarray:
   """Constructs a non-standard mesh layout to test all cases.
 
   By default, when we reshape a 32 (i.e. 4 hosts, 8 devices each) slice to
-  (data, model) unless the length of the model dimension is great than the 
+  (data, model) unless the length of the model dimension is great than the
   number of devices per host, it will not be arranged with the second dimension
   crossing host boundaries. This makes sense - but we want to test the most
   general case: where a given host may have multiple independent model replicas
-  on it (each loading different data), and where these replicas may stretch 
+  on it (each loading different data), and where these replicas may stretch
   across host boundaries.
 
   This may occur! E.g. PaLM used 12 way model parallelism in a given replica.
@@ -225,7 +225,7 @@ def get_next_per_replica(device_to_shard_info: Dict[Device, ShardInfo],
 ######################## Per host data pipeline ################################
 ################################################################################
 
-_hashed_set_of_indexes = lambda indexes: hash(
+_hashed_set_of_indexes = lambda indexes: hash(  # pylint: disable=g-long-lambda
     np.array([(v.start, v.stop) for idx in indexes for v in idx]).tobytes())  # pylint: disable=g-complex-comprehension
 
 
@@ -491,7 +491,6 @@ def test_case(method: str):
   """Generic code to set up the tests of each pipeline method."""
   print(f'----------- Now testing {method} method ------------------------')
   # Initialise our desired GDA shape and device mesh layout
-  # Construct global data
   global_data_shape = (32, 4)
   data_axes = P('data', None)
   # Create our device mesh - this function arranges a 4 hosts/32 devices
@@ -511,6 +510,7 @@ def test_case(method: str):
   device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
                                               data_axes)
 
+  # Create a test dataset
   global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
   dataset = tf.data.Dataset.from_tensor_slices(global_data)
 

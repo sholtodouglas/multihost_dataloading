@@ -67,6 +67,11 @@ if __name__ == "__main__":
         f"Host {idx}: Internal IP: {addr['ipAddress']} External IP {addr['accessConfig']['externalIp']}")
 
   internal_ips = [addr['ipAddress'] for addr in info['networkEndpoints']]
+
+  # TODO: Include -f path in setuppy - was annoying for some reason?
+  output = subprocess.run(
+      f'gcloud compute tpus tpu-vm ssh {args.tpu_name} --zone {args.zone} --project {args.project} --worker=all --command "pip install "\'"jax[tpu] >= 0.2.16"\'" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html"', shell=True, check=True)
+
   #############################################################################
   ########## SSH key config so that the main host can talk to the others ######
   #############################################################################

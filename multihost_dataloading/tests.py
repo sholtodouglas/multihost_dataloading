@@ -14,12 +14,13 @@ from collections import defaultdict  # pylint: disable=g-importing-member
 from dataclasses import dataclass  # pylint: disable=g-importing-member
 from functools import partial  # pylint: disable=g-importing-member
 import os
-from typing import Any, Dict, List, NewType, Tuple
+from typing import Any, Dict, List, Tuple, Callable
 
 import jax
 from jax.experimental import global_device_array as gda_lib
 from jax.experimental import PartitionSpec as P
 from jax.experimental.global_device_array import GlobalDeviceArray
+from jax.experimental.global_device_array import Device
 from jax.experimental.maps import Mesh
 from jax.experimental.pjit import pjit
 from jax.experimental.pjit import with_sharding_constraint
@@ -28,9 +29,7 @@ import numpy as np
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # disable CUDA not found etc warnings
 import tensorflow as tf  # pylint: disable=g-import-not-at-top
 
-# TODO(sholto): Typing - e.g. for TfrtTpuDevices
-Device = NewType('Device', Any)
-DeviceBuffer = NewType('DeviceBuffer', Any)
+
 
 # make pjit output GDAs
 jax.config.update('jax_parallel_functions_output_gda', True)
@@ -85,10 +84,26 @@ def construct_test_mesh_32() -> np.ndarray:
 
 
 def get_all_data_all_hosts_pipeline(
-    dataset: tf.data.Dataset, global_data_shape: np.ndarray) -> tf.data.Dataset:
+    dataset: tf.data.Dataset, global_data_shape: np.ndarray, global_mesh: Mesh, data_axes: P) -> Callable:
   """Return the same, globally sized dataloader across all hosts."""
-  return (dataset.batch(
+
+  # Get the slices of the GDA corresponding to each device (globally)
+  # returns [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
+  #                              (slice(6, 8, None), slice(None, None, None)),]
+  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
+                                              data_axes)
+
+  dataset =  (dataset.batch(
       global_data_shape[data_dim]).repeat().as_numpy_iterator())
+
+  next_fn =  partial(get_next_all_data_all_hosts,
+        dataset,
+        device_to_index,
+        global_data_shape,
+        global_mesh,
+        data_axes,
+  )
+  return next_fn
 
 
 def get_next_all_data_all_hosts(dataset, device_to_index: Dict[Device,
@@ -131,8 +146,7 @@ class ShardInfo:
 
 
 def get_per_replica_data_pipeline(
-    dataset: tf.data.Dataset, device_to_index: Dict[Device, Tuple[slice, slice]]
-) -> Tuple[Dict[Device, ShardInfo], Dict[int, tf.data.Dataset]]:
+  dataset: tf.data.Dataset, global_data_shape: np.ndarray, global_mesh: Mesh, data_axes: P) -> Callable:
   """Create a tf.dataset per unique slice of data to be loaded to the host (i.e per replica).
 
   Identifies what data the host wants to load for it's devices, deduplicates it
@@ -163,6 +177,8 @@ def get_per_replica_data_pipeline(
     shard_idx_to_dataset: Which shard index maps to which dataset
   """
 
+  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
+                                            data_axes)
   # get the unique set of slices into the GDA (i.e one per replica)
   # and which devices map to those
   index_hash_to_shard_idx = {}  # int, int
@@ -195,7 +211,15 @@ def get_per_replica_data_pipeline(
     if shard_info.idx not in shard_idx_to_dataset:
       shard_idx_to_dataset[shard_info.idx] = sharded_dataset
 
-  return device_to_shard_info, shard_idx_to_dataset
+  next_fn = partial(get_next_per_replica,
+        device_to_shard_info,
+        shard_idx_to_dataset,
+        global_data_shape,
+        global_mesh,
+        data_axes,
+    )
+
+  return next_fn
 
 
 def get_next_per_replica(device_to_shard_info: Dict[Device, ShardInfo],
@@ -316,8 +340,7 @@ def convert_global_indices_to_local_indices(
 
 
 def get_per_host_data_pipeline(
-    dataset: tf.data.Dataset, device_to_index: Dict[Device, Tuple[slice, slice]]
-) -> Tuple[tf.data.Dataset, Dict[Device, slice]]:
+  dataset: tf.data.Dataset, global_data_shape: np.ndarray, global_mesh: Mesh, data_axes: P) -> Callable:
   """Test the case where we have one data pipeline per host.
 
   To do this, we determine which pieces of data each host needs to feed it's
@@ -338,6 +361,9 @@ def get_per_host_data_pipeline(
     host_local_indices: indices for just the data loaded by the host's pipeline
   """
 
+  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
+                                              data_axes)
+
   host_to_devices = defaultdict(list)
   for d in jax.devices():
     host_to_devices[d.host_id].append(d)  # default dict so no need to check
@@ -356,7 +382,15 @@ def get_per_host_data_pipeline(
       dataset.shard(num_shards=num_shards, index=local_data_shard_index).batch(
           total_data_to_load).repeat().as_numpy_iterator())  # for Jax
 
-  return sharded_dataset, host_local_indices
+  next_fn = partial(get_next_per_host,
+        sharded_dataset,
+        host_local_indices,
+        global_data_shape,
+        global_mesh,
+        data_axes,
+    )
+
+  return next_fn
 
 
 def get_next_per_host(sharded_dataset: tf.data.Dataset,
@@ -387,8 +421,8 @@ def get_next_per_host(sharded_dataset: tf.data.Dataset,
 
 
 # TODO(sholto): account for slicing / padding requirements
-def get_fully_sharded_data_pipeline(dataset: tf.data.Dataset,
-                                    global_data_shape: np.ndarray):
+def get_fully_sharded_data_pipeline(
+  dataset: tf.data.Dataset, global_data_shape: np.ndarray, global_mesh: Mesh, data_axes: P) -> Callable:
   """Test where each device loads batch_size/num_devices, then reshards in pjit.
 
   To do this, each host first loads batch_size/num_hosts, then shards that
@@ -410,7 +444,11 @@ def get_fully_sharded_data_pipeline(dataset: tf.data.Dataset,
       dataset.shard(num_shards=jax.process_count(),
                     index=jax.process_index()).batch(
                         per_host).repeat().as_numpy_iterator())
-  return sharded_dataset
+
+  next_fn = partial(get_next_fully_sharded, sharded_dataset, global_data_shape,
+                                 global_mesh, data_axes)
+
+  return next_fn
 
 
 def reshard_fn(desired_partition_spec: P,
@@ -504,59 +542,19 @@ def test_case(method: str):
   #     22223333
   #     22223333
 
-  # Get the slices of the GDA corresponding to each device (globally)
-  # returns [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
-  #                              (slice(6, 8, None), slice(None, None, None)),]
-  device_to_index = gda_lib.get_shard_indices(global_data_shape, global_mesh,
-                                              data_axes)
-
   # Create a test dataset
   global_data = np.arange(np.prod(global_data_shape)).reshape(global_data_shape)
   dataset = tf.data.Dataset.from_tensor_slices(global_data)
 
-  if method == 'all_data_all_hosts':
-    dataset = get_all_data_all_hosts_pipeline(dataset, global_data_shape)
-    gda = get_next_all_data_all_hosts(
-        dataset,
-        device_to_index,
-        global_data_shape,
-        global_mesh,
-        data_axes,
-    )
+  method_to_fn = {
+    'all_data_all_hosts': get_all_data_all_hosts_pipeline,
+    'per_replica': get_per_replica_data_pipeline,
+    'per_host': get_per_host_data_pipeline,
+    'fully_sharded': get_fully_sharded_data_pipeline,
+  }
 
-  elif method == 'per_replica':
-    # get the mapping of devices to data shards, and the unique set of shard
-    # indices with their corresponding datasets
-    device_to_shard_info, shard_idx_to_dataset = get_per_replica_data_pipeline(
-        dataset, device_to_index)
-    gda = get_next_per_replica(
-        device_to_shard_info,
-        shard_idx_to_dataset,
-        global_data_shape,
-        global_mesh,
-        data_axes,
-    )
-
-  elif method == 'per_host':
-    # returns single tf.data shard per host, and how the local devices index in
-    sharded_dataset, host_local_indices = get_per_host_data_pipeline(
-        dataset, device_to_index)
-    gda = get_next_per_host(
-        sharded_dataset,
-        host_local_indices,
-        global_data_shape,
-        global_mesh,
-        data_axes,
-    )
-
-  elif method == 'fully_sharded':
-    sharded_dataset = get_fully_sharded_data_pipeline(dataset,
-                                                      global_data_shape)
-    gda = get_next_fully_sharded(sharded_dataset, global_data_shape,
-                                 global_mesh, data_axes)
-
-  else:
-    raise NotImplementedError
+  next_batch_fn = method_to_fn[method](dataset, global_data_shape, global_mesh, data_axes)
+  gda = next_batch_fn()
 
   print(f'First device: \n {gda.local_data(0)}')
   print(f'Fifth device: \n {gda.local_data(4)}')
@@ -613,8 +611,8 @@ def test_gda_output(global_data: np.ndarray, gda: GlobalDeviceArray,
 
 
 test_case('all_data_all_hosts')
-test_case('per_host')
 test_case('per_replica')
+test_case('per_host')
 test_case('fully_sharded')
 # Note: tests which set up one host to have multiple processes
 #  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

@@ -63,3 +63,8 @@ Other options I've heard that work well are emacs on host 0, using terminal broa
 > **Note**
 > If you interrupt the script during scp, gcp is sometimes interrupted while writing to google_compute_known_hosts, and will fail the next time you try as the keys of the remote address do not match what it expects. To fix this, go to ~/.ssh/google_compute_known_hosts, and delete the lines corresponding to this tpu so it can start fresh.
 
+
+What happens if you hit run slightly too fast for fswatch and end up with hanging processes? No problem! Just kill them using the following helper.
+```
+python3 workflow_setup/kill_hanging_processes.py --tpu_name=$TPU_NAME --zone=$ZONE --project=$PROJECT --proc_name=dataloaders.py
+```

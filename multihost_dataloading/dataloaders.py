@@ -654,7 +654,7 @@ def get_fully_sharded_data_pipeline(
   return next_fn
 
 
-def reshard_fn(shape_to_sharding: Dict[Tuple, P],
+def reshard_fn(input_constraints,
                input_gda: GlobalDeviceArray) -> GlobalDeviceArray:
   '''Infer sharding from shape. 
   
@@ -666,8 +666,8 @@ def reshard_fn(shape_to_sharding: Dict[Tuple, P],
   # TODO(sholto): pax has initial reshapes to prevent unnecessary
   #               halo exchanges. Understand and implement.
   # TODO(sholto): in the step fn is also where we would remove padding
-  sharding = shape_to_sharding[input_gda.shape]
-  return with_sharding_constraint(input_gda, sharding)
+  return jax.tree_map(with_sharding_constraint, input_gda, input_constraints)
+
 
 
 def get_next_fully_sharded(local_dataset: tf.data.Dataset,
@@ -732,14 +732,9 @@ def get_next_fully_sharded(local_dataset: tf.data.Dataset,
   input_constraints = jax.tree_map(matching_input_structure, output_constraints)
 
   reshard = pjit(
-      partial(reshard_fn, shape_to_sharding),
-      in_axis_resources=input_constraints,
+      partial(reshard_fn, output_constraints),
+      in_axis_resources=(input_constraints,),
       out_axis_resources=output_constraints)
-
-  print(jax.tree_util.tree_structure(inputs_to_pjit))
-  print(len(inputs_to_pjit))
-  print(jax.tree_util.tree_structure(input_constraints))
-  print(jax.tree_util.tree_structure(output_constraints))
 
   with global_mesh:
     desired_gda = reshard(inputs_to_pjit)
@@ -863,6 +858,6 @@ if __name__ == '__main__':
   test_correctness('all_data_all_hosts')
   test_correctness('per_replica')
   test_correctness('per_host')
-  # test_correctness('fully_sharded')
+  test_correctness('fully_sharded')
 # Note: tests which set up one host to have multiple processes
 #  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

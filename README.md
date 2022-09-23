@@ -11,7 +11,7 @@ git clone https://github.com/sholtodouglas/multihost_dataloading
 cd multihost_dataloading
 pip install -e .
 
-python3 multihost_dataloading/tests.py
+python3 multihost_dataloading/dataloaders.py
 ```
 
 The following diagrams are laid at as below - testing the fully general case with a 32 device pod - where we have both replicas shared across devices, and multiple replicas per device. 

@@ -1,7 +1,5 @@
 """Code to test data pipeline arrangements.
-
 Code arranged as follows
-
 - Initalisation code
 - Per test case unique code
   - For each, we have a factory function which returns a 'get_next_gda' fn.
@@ -11,7 +9,6 @@ Code arranged as follows
     returns a pytree of gdas. This necessitates a little fancy tree_mapping 
     internally.
 - Test harness
-
 TODO(sholto):
 - Properly benchmark
 """
@@ -46,7 +43,6 @@ data_dim = 0  # assume data dimension is the first
 
 def construct_test_mesh_32() -> np.ndarray:
   """Constructs a non-standard mesh layout to test all cases.
-
   By default, when we reshape a 32 (i.e. 4 hosts, 8 devices each) slice to
   (data, model) unless the length of the model dimension is great than the
   number of devices per host, it will not be arranged with the second dimension
@@ -54,18 +50,14 @@ def construct_test_mesh_32() -> np.ndarray:
   general case: where a given host may have multiple independent model replicas
   on it (each loading different data), and where these replicas may stretch
   across host boundaries.
- 
   This may occur! E.g. PaLM used 12 way model parallelism in a given replica.
   Which is not evenly divisble by the number of devices on many TPU platforms.
-
   To test this, we want a layout that looks like this, values indicate host idx
   of devices.
-
       00001111
       00001111
       22223333
       22223333
-
   Returns:
     test_mesh_layout: np.ndarray of Device objects
   """
@@ -104,24 +96,14 @@ def check_inputs(dataset, global_data_shape, data_axes):
   shapes, _ = jax.tree_util.tree_flatten(global_data_shape)
   batch_dims = [s[0] for s in shapes]
 
-  def all_data_dim_same(items):
-    return all(b == batch_dims[0] for b in batch_dims)
 
-  assert all_data_dim_same(shapes), 'All batch axis should be equal for gdas'
-  assert all_data_dim_same(
-      data_axes
-  ), 'All dataset elements should be sharded along the data axis identically'
+
+  assert all(b == batch_dims[0]for b in batch_dims), 'All batch axis should be equal for gdas'
+
+  assert all(b[0] == shapes[0][0] for b in shapes), 'All dataset elements should be sharded along the data axis identically'
 
   batch_dim = batch_dims[0]
   return batch_dim
-
-
-class LeafDict(dict):
-  pass
-
-
-def wrap_dict_as_pytree_leaf(d: Dict) -> LeafDict:
-  return LeafDict(d)
 
 
 ################################################################################
@@ -140,18 +122,12 @@ def get_all_data_all_hosts_pipeline(dataset: tf.data.Dataset,
   # Get the slices of the GDA corresponding to each device (globally)
   # returns [TpuDevice(id=27, process_index=2, coords=(1,3,0), core_on_chip=1):
   #                              (slice(6, 8, None), slice(None, None, None)),]
-  # Normally, this function returns a dictionary. We want to be able to match
-  # that whole dictionary as leaves to the structure of the data outputs,
-  #  so we wrap it in a custom dict class.
-  def _get_shard_indices(shape, axes):
-    shape = tuple(shape)  # now we are inside a tree map, convert back
-    return wrap_dict_as_pytree_leaf(
-        gda_lib.get_shard_indices(shape, global_mesh, axes))
-
   # this is now a pytree of 'device_to_index' objects
   # matching the structure of dataloader outputs
-  device_to_index = jax.tree_map(_get_shard_indices, global_data_shape,
-                                 data_axes)
+  device_to_index = jax.tree_map(
+    lambda shape, axes: gda_lib.get_shard_indices(shape, global_mesh, axes),
+    global_data_shape,
+    data_axes)
 
   # one data pipeline, the same across every host
   dataset = (dataset.batch(batch_dim).repeat().as_numpy_iterator())
@@ -183,23 +159,16 @@ def get_next_all_data_all_hosts(dataset, device_to_index: Dict[Device,
         for device in jax.local_devices()
     ]
     #  Wrap device buffers as GDA
-    shape = tuple(shape)  # now we are inside a tree map, make tuple
     gda = GlobalDeviceArray(shape, global_mesh, axes, device_buffers)
     return gda
 
-  pytree_of_gdas = jax.tree_map(form_gda, batch, global_data_shape, data_axes,
-                                device_to_index)
+  # tree map over multiple trees uses the first tree as a structure 
+  # prefix, which means subsequent trees follow
+  pytree_of_gdas = jax.tree_map(
+      form_gda, batch, global_data_shape, data_axes, device_to_index)
 
   return pytree_of_gdas
 
-
-################################################################################
-####################### Per device data pipeline ###############################
-################################################################################
-
-# No reason to test - it is 2 lines less than per replica data pipeline, and
-# has much higher overhead potential. Base case sufficiently represented in
-# strawman, which two lines would be removed is noted below.
 
 ################################################################################
 ######################## Per replica data pipeline #############################
@@ -216,42 +185,34 @@ def get_per_replica_data_pipeline(
     dataset: tf.data.Dataset, global_data_shape: Pytree, global_mesh: Mesh,
     data_axes: Pytree) -> Callable[[], GlobalDeviceArray]:
   """Create a tf.dataset per unique slice of data to be loaded to the host (i.e per replica).
-
   Identifies what data the host wants to load for it's devices, deduplicates it
   - and returns a data pipeline per unique slice desired by the devices. In 'get
   next', it sequentially loads each of these. This is simpler than the per host
   method, but introduces overheads from several sequential calls to a data
   pipeline, as opposed to a single equivalently sized call.
-
   Returns two dicts because we only want to load each of the datasets in
   shard_idx_to_dataset once, not once per device - so we need both the
   unique pipelines, and the per device mapping to them.
-
   + Efficiently deduplicates the data to load per host
   + Low-medium complexity
   - Overhead from multiple calls to tf.data
-
   Args:
     dataset: tf dataset over all files
     global_data_shape: what the size of the GDA should be
     global_mesh: global deivces mesh
     data_axes: axes along which data is partitioned
-
   Returns:
     next_fn: Function to get the next batch as a pytree of GDAs
   """
 
   check_inputs(dataset, global_data_shape, data_axes)
 
-  def _get_shard_indices(shape, axes):
-    shape = tuple(shape)  # now we are inside a tree map, convert back
-    return wrap_dict_as_pytree_leaf(
-        gda_lib.get_shard_indices(shape, global_mesh, axes))
-
   # this is now a pytree of 'device_to_index' objects
   # matching the structure of dataloader outputs
-  device_to_index = jax.tree_map(_get_shard_indices, global_data_shape,
-                                 data_axes)
+  device_to_index = jax.tree_map(
+    lambda shape, axes: gda_lib.get_shard_indices(shape, global_mesh, axes),
+    global_data_shape,
+    data_axes)
 
   # We want two things out of this next piece of code.
   # device_to_shard_info: Which shard of data should go on which
@@ -272,40 +233,32 @@ def get_per_replica_data_pipeline(
   # and map the devices to those shards.
   shard_idx_to_dataset = {}
 
-  def identify_shards(device_to_index) -> Dict[Device, ShardInfo]:
+  def identify_shards(_, device_to_index) -> Dict[Device, ShardInfo]:
     # Now, the following gets the unique set of slices into the
     # GDA (i.e one per replica) and which devices map to those.
-    index_hash_to_shard_idx = {}  # int, int
-    device_to_shard_info = {}  # device, int,
+    index_hash_to_shard_idx : Dict[int, int] = {}
+    device_to_shard_info : Dict[Device, int] = {}
     for (device, index_tuple) in device_to_index.items():
       index_hash = gda_lib._hashed_index(index_tuple)  # pylint: disable=protected-access
-
-      if index_hash not in index_hash_to_shard_idx:
-        index_hash_to_shard_idx[index_hash] = len(index_hash_to_shard_idx)
-
+      shard_idx = index_hash_to_shard_idx.setdefault(index_hash, len(index_hash_to_shard_idx))
       indices_size = index_tuple[data_dim].stop - index_tuple[data_dim].start
-      device_to_shard_info[device] = ShardInfo(
-          index_hash_to_shard_idx[index_hash], indices_size)
+      device_to_shard_info[device] = ShardInfo(shard_idx, indices_size)
 
     num_shards = len(index_hash_to_shard_idx)
-
     for device in jax.local_devices():
       shard_info = device_to_shard_info[device]
-
-      sharded_dataset = iter(
-          dataset.shard(num_shards=num_shards, index=shard_info.idx).batch(
-              shard_info.size).repeat().as_numpy_iterator())  # for Jax
-
-      # we only want one copy of each pipeline per host. To change this to
-      # per-device, simply use a list instead of dict here - removing the
-      # if in line, and making indexing in one line les s laters.
       if shard_info.idx not in shard_idx_to_dataset:
-        shard_idx_to_dataset[shard_info.idx] = sharded_dataset
-    return wrap_dict_as_pytree_leaf(device_to_shard_info)
+        shard_idx_to_dataset[shard_info.idx] = iter(
+            dataset.shard(num_shards=num_shards, index=shard_info.idx)
+                  .batch(shard_info.size)
+                  .repeat()
+                  .as_numpy_iterator())
+
+    return device_to_shard_info
 
   # create one of these for each dataset element
   # so that it can slice into the generated data appropriately
-  device_to_shard_info = jax.tree_map(identify_shards, device_to_index)
+  device_to_shard_info = jax.tree_map(identify_shards, global_data_shape, device_to_index)
 
   next_fn = partial(
       get_next_per_replica,
@@ -319,65 +272,35 @@ def get_per_replica_data_pipeline(
   return next_fn
 
 
-# @levskaya, @skyewanderman this is a bit of a hack. 
-# I'm going to try and do it neater.
 def transpose_and_wrap_per_shard(
     shard_idx_to_loaded_data: Dict[int, Pytree]) -> Pytree:
   """Creates necessary datastructure to provide dicts of shards to tree_map.
-
     After calling data.next() for each shard, we now have arbitrary pytrees
     under each shard idx as outputs from the dataloader. E.g. we might have
     the following, with a nested multilevel dict/tuple.
     {shard_idx1: {'inputs': (Array, Array) 'labels': Array}, shard_idx2: ...}
     we want instead
-    {'inputs': {Container, Container), 'labels': Container}
+    {'inputs': ({shard_idx1: Array, shard_idx2: Array}, ...), 'labels': ...}
     where container is a dict containing all the shards for that object to be
     formed into a GDA, but a standard dict would be enumerated by tree_map
-    rather than passed whole.
-    We create a custom leaf for the pytree that holds the necessary
-    information for that whole GDA to be formed per object in the tf.data
-    ouptut.
-    We only need this function for the per replica option, as only here do
-    we have mutiple pipelines on the one host. Everywhere else only a single
-    data pipeline is called and the output is therefore in the correct
-    pytree structure. With them, the complexity lies in deriving the initial
-    pipeline.
-
+    rather than passed whole, so use a custom unregistered "leaf-like" dict
+    type instead.
     Args:
       shard_index_to_loaded_data: A dict mapping shard indices to that shard of
       tf.data results
-
     Returns:
       A pytree matching an individual tf.data call, but holding a custom dict
       as each leaf so that a GDA can be formed from sharded pieces.
   """
-  first_dict_key = next(iter(shard_idx_to_loaded_data))
-  sample_dataset = shard_idx_to_loaded_data[first_dict_key]
-  desired_structure = jax.tree_util.tree_structure(sample_dataset)
-  num_shard_indices = len(shard_idx_to_loaded_data)
-  # the first n elements may not correspond to the
-  # 0-th shard, as only shards 3,5 may be on on this host
-  shard_indices = [k for k, _ in shard_idx_to_loaded_data.items()]
-  # As a result, we flatten the pytree,
-  leaves, _ = jax.tree_util.tree_flatten(shard_idx_to_loaded_data)
-  num_containers = len(leaves) // num_shard_indices
-  # We want to handle arbitrary tf.data pytrees and because tree_map
-  # enumerates all leaves, we need to construct a custom class to hold the per
-  # shard data for that leaf of the tf.data result. Custom classes are treated
-  # as a single leaf, so we can pass the entire class to tree map.
-  containers = [wrap_dict_as_pytree_leaf(dict()) for _ in range(num_containers)]
-  for container_idx in range(0, num_containers):
-    # containers are formed from every num_total_leaves % num_containers
-    # where num_containers is the total number of leaf GDAs formed.
-    # This assumes that each element produced by tf.data has the same
-    # number along any partitioned dimensions, and that the partitioned
-    # dimensions are the same.
-    values = leaves[container_idx::num_containers]
-    for value_idx, value in enumerate(values):
-      shard_index = shard_indices[value_idx]
-      containers[container_idx][shard_index] = value
-  # And reform a pytree with the containers as leaf nodes
-  return jax.tree_util.tree_unflatten(desired_structure, containers)
+  outer_structure = jax.tree_util.tree_structure(
+      {k: 0 for k in shard_idx_to_loaded_data})
+  inner_structure = jax.tree_util.tree_structure(
+      next(iter(shard_idx_to_loaded_data.values())))
+  transposed_tree = jax.tree_util.tree_transpose(
+      outer_structure,
+      inner_structure,
+      shard_idx_to_loaded_data)
+  return transposed_tree
 
 
 def get_next_per_replica(device_to_shard_info: Pytree,
@@ -394,8 +317,10 @@ def get_next_per_replica(device_to_shard_info: Pytree,
       shard_idx_to_loaded_data)
 
   # for each leaf in the data output pytree
-  def form_gda(per_output_sharded_info: Dict[int, tf.data.Dataset],
-               device_to_shard_info: Dict[Device, ShardInfo], shape: Pytree,
+  # pass shape first as global_data_shape defines tree structure prefix
+  def form_gda(shape: Pytree,
+               per_output_sharded_info: Dict[int, tf.data.Dataset],
+               device_to_shard_info: Dict[Device, ShardInfo],
                axes: Pytree) -> GlobalDeviceArray:
 
     device_buffers = []
@@ -404,12 +329,13 @@ def get_next_per_replica(device_to_shard_info: Pytree,
       data = per_output_sharded_info[data_shard_info.idx]
       device_buffers.append(jax.device_put(data, device))
     #  Wrap device buffers as GDA
-    shape = tuple(shape)  # now we are back inside a leaf fn
     gda = GlobalDeviceArray(shape, global_mesh, axes, device_buffers)
     return gda
 
-  pytree_of_gdas = jax.tree_map(form_gda, per_output_sharded_info,
-                                device_to_shard_info, global_data_shape,
+  pytree_of_gdas = jax.tree_map(form_gda,
+                                global_data_shape,
+                                per_output_sharded_info,
+                                device_to_shard_info,
                                 data_axes)
   return pytree_of_gdas
 
@@ -417,31 +343,6 @@ def get_next_per_replica(device_to_shard_info: Pytree,
 ################################################################################
 ######################## Per host data pipeline ################################
 ################################################################################
-
-_hashed_set_of_indexes = lambda indexes: hash(  # pylint: disable=g-long-lambda
-    np.array([(v.start, v.stop) for idx in indexes for v in idx]).tobytes())  # pylint: disable=g-complex-comprehension
-
-
-def get_total_length_of_unique_indexes(
-    unique_indexes: List[Tuple[slice, slice]]) -> int:
-  size = 0
-  for (data, _) in unique_indexes:
-    size += data.stop - data.start
-  return size
-
-
-def deduplicate_indexes(
-    local_indexes: List[Tuple[Device, Tuple[slice, slice]]]
-) -> Dict[int, Tuple[slice, slice]]:
-  """Returns the unique set of indexes we need to load locally."""
-  unique_indices = {}  # hash, indices
-
-  for (_, index_tuple) in local_indexes:
-    index_hash = gda_lib._hashed_index(index_tuple)  # pylint: disable=protected-access
-    if index_hash not in unique_indices:
-      unique_indices[index_hash] = index_tuple
-
-  return unique_indices
 
 
 def get_unique_shards(
@@ -454,26 +355,13 @@ def get_unique_shards(
   dataset_shard_hash_to_index = {}  # [hash, index]
 
   for host_id, host_devices in host_to_devices.items():
-
-    # get exclusively the indexes for host_id
-    host_device_to_global_indexes = [
-        (device, device_to_index[device]) for device in host_devices
-    ]
-    # deduplicate these
-    idx_hash_to_unique_indices = deduplicate_indexes(
-        host_device_to_global_indexes)
-
-    # hash the set of indices for this host
-    pipeline_hash = _hashed_set_of_indexes(
-        [idx for _, idx in idx_hash_to_unique_indices.items()])
-
+    host_indices = [device_to_index[device] for device in host_devices]
+    hashable_indices = jax.tree_map(lambda s: (s.start, s.stop), host_indices)
+    pipeline_hash = hash(tuple(set(hashable_indices)))
     # assign each host's set of indices a shard index in the order we discover
     # this will be the shard index loaded by tf.data
-    if pipeline_hash not in dataset_shard_hash_to_index:
-      dataset_shard_hash_to_index[pipeline_hash] = len(
-          dataset_shard_hash_to_index)
-
-    host_to_dataset_shard[host_id] = dataset_shard_hash_to_index[pipeline_hash]
+    host_to_dataset_shard[host_id] = dataset_shard_hash_to_index.setdefault(
+        pipeline_hash, len(dataset_shard_hash_to_index))
 
   # tf.data requires total num shards
   num_unique_shards = len(dataset_shard_hash_to_index)
@@ -484,26 +372,23 @@ def convert_global_indices_to_local_indices(
     device_to_index: Dict[Device, Tuple[slice, slice]]
 ) -> Tuple[Dict[Device, slice], int]:
   """Converts global GDA indices for each device to local indices of host loaded data."""
-  device_index_hash_to_local_index = {}  # hash, [slice, slice]
-  device_to_local_indices = {}  # device, [slice, slice]
-  total_data_to_load = 0
-  for device in jax.local_devices():
-    # get a hash to identify this unique slice into the global array
-    global_index_tuple = device_to_index[device]
-    global_index_hash = gda_lib._hashed_index(global_index_tuple)  # pylint: disable=protected-access
-    if global_index_hash not in device_index_hash_to_local_index:
-      # assign the global slice a slice from the local data
-      # it doesn't matter if this was the same as the original slice
-      # as long as it is the same size, and shard among other devices
-      # who match that global slice hash
-      size = global_index_tuple[data_dim].stop - global_index_tuple[
-          data_dim].start
-      local_slice = slice(total_data_to_load, total_data_to_load + size, None)
-      device_index_hash_to_local_index[global_index_hash] = local_slice
-      total_data_to_load += size
 
-    device_to_local_indices[device] = device_index_hash_to_local_index[
-        global_index_hash]
+  local_indices = [device_to_index[device] for device in jax.local_devices()]
+  # Tacit assumption that we -only- shard dataset batch along data dim here, we could
+  # relax this but I'm not sure it would actually be handled right by this approach:
+  data_indices = [(s[data_dim].start, s[data_dim].stop) for s in local_indices]
+  unique_slice_sizes = {idx: idx[1]-idx[0] for idx in data_indices}
+
+  # assign a unique local data slice to each device
+  total_data_to_load = 0
+  device_index_hash_to_local_index = {}
+  for idx, size in unique_slice_sizes.items():
+    device_index_hash_to_local_index[idx] = slice(total_data_to_load, total_data_to_load + size)
+    total_data_to_load += size
+
+  device_to_local_indices = {}
+  for device, data_index in zip(jax.local_devices(), data_indices):
+    device_to_local_indices[device] = device_index_hash_to_local_index[data_index]
 
   return device_to_local_indices, total_data_to_load
 
@@ -512,13 +397,11 @@ def get_per_host_data_pipeline(dataset: tf.data.Dataset,
                                global_data_shape: np.ndarray, global_mesh: Mesh,
                                data_axes: P) -> Callable[[], Pytree]:
   """Test the case where we have one data pipeline per host.
-
   To do this, we determine which pieces of data each host needs to feed it's
   devices,
   identify the unique sets of these (which is likely < num_hosts), and then
   create
   a data pipeline for each set.
-
   + No overhead from multiple pipelines per host
   - High complexity
   - Doesn't allow for incomplete overlap in the batches loaded by hosts
@@ -527,7 +410,6 @@ def get_per_host_data_pipeline(dataset: tf.data.Dataset,
     global_data_shape: what the size of the GDA should be
     global_mesh: global deivces mesh
     data_axes: axes along which data is partitioned
-
   Returns:
     sharded_dataset: Correct dataset to load for this host
     host_local_indices: indices for just the data loaded by the host's pipeline
@@ -535,32 +417,29 @@ def get_per_host_data_pipeline(dataset: tf.data.Dataset,
 
   check_inputs(dataset, global_data_shape, data_axes)
 
-  
-  def _get_shard_indices(shape, axes):
-    shape = tuple(shape)  # now we are inside a tree map, convert back
-    return wrap_dict_as_pytree_leaf(
-        gda_lib.get_shard_indices(shape, global_mesh, axes))
+  # pytree of 'device_to_index' objects matching the structure of data
+  device_to_index = jax.tree_map(
+    lambda shape, axes: gda_lib.get_shard_indices(shape, global_mesh, axes),
+    global_data_shape,
+    data_axes)
 
-  # this is now a pytree of 'device_to_index' objects
-  # matching the structure of dataloader outputs
-  device_to_index = jax.tree_map(_get_shard_indices, global_data_shape,
-                                 data_axes)
-
+  # group by host_id
   host_to_devices = defaultdict(list)
   for d in jax.devices():
-    host_to_devices[d.host_id].append(d)  # default dict so no need to check
+    host_to_devices[d.host_id].append(d)
+
   # Now, we want to find the number of unique (per host) dataset shards which
   # should be loaded and assign each host to their shard.
-  # TODO(sholto): Check if we could get as good results with interleave
 
   # Now, as we are creating our own slice in this function, and assuming that
   # we only have one dimension we are sharding along, we don't need to do
-  # clever tree mapping as the unique shards -> therefore just take 
+  # clever tree mapping as the unique shards -> therefore just take
   # the first one and get the unique sharding from that.
-  flattened, _ = jax.tree_util.tree_flatten(device_to_index)
-  representative_device_to_index = flattened[0]
-  host_to_dataset_shard, num_shards = get_unique_shards(host_to_devices,
-                                                  representative_device_to_index)
+  dataset_structure = jax.tree_util.tree_structure(global_data_shape)
+  representative_device_to_index = dataset_structure.flatten_up_to(
+      device_to_index)[0]
+  host_to_dataset_shard, num_shards = get_unique_shards(
+    host_to_devices, representative_device_to_index)
   # And assign devices indices into the data to be loaded by the host
   # The slices generated here are only along the batch dim, and thus will work
   # for all items in the data output pytree
@@ -570,8 +449,10 @@ def get_per_host_data_pipeline(dataset: tf.data.Dataset,
   # Create the data pipeline
   local_data_shard_index = host_to_dataset_shard[jax.process_index()]
   sharded_dataset = iter(
-      dataset.shard(num_shards=num_shards, index=local_data_shard_index).batch(
-          total_data_to_load).repeat().as_numpy_iterator())  # for Jax
+      dataset.shard(num_shards=num_shards, index=local_data_shard_index)
+             .batch(total_data_to_load)
+             .repeat()
+             .as_numpy_iterator())
 
   next_fn = partial(
       get_next_per_host,
@@ -601,15 +482,10 @@ def get_next_per_host(sharded_dataset: tf.data.Dataset,
       local_indices = host_local_indices[device]
       data = element[local_indices]
       device_buffers.append(jax.device_put(data, device))
+    return GlobalDeviceArray(shape, global_mesh, axes, device_buffers)
 
-    # Wrap device buffers as GDA
-    # within the tree leaves, convert back to tuple
-    shape = tuple(shape)
-    return GlobalDeviceArray(shape, global_mesh, axes,
-                            device_buffers)
-  
-  pytree_of_gdas = jax.tree_map(form_gda, local_data, global_data_shape,
-                              data_axes)
+  pytree_of_gdas = jax.tree_map(
+      form_gda, local_data, global_data_shape, data_axes)
 
   return pytree_of_gdas
 
@@ -624,10 +500,8 @@ def get_fully_sharded_data_pipeline(
     dataset: tf.data.Dataset, global_data_shape: np.ndarray, global_mesh: Mesh,
     data_axes: P) -> Callable[[], GlobalDeviceArray]:
   """Test where each device loads batch_size/num_devices, then reshards in pjit.
-
   To do this, each host first loads batch_size/num_hosts, then shards that
   equally across it's devices.
-
   + Lowest data volume
   + Low complexity
   - Padding and slicing required when batch is not divisible by num_devices
@@ -637,7 +511,6 @@ def get_fully_sharded_data_pipeline(
     global_data_shape: what the size of the GDA should be
     global_mesh: global deivces mesh
     data_axes: axes along which data is partitioned
-
   Returns:
     sharded_dataset: per_host dataset
   """
@@ -645,8 +518,10 @@ def get_fully_sharded_data_pipeline(
   per_host = batch // jax.process_count()
   sharded_dataset = iter(
       dataset.shard(num_shards=jax.process_count(),
-                    index=jax.process_index()).batch(
-                        per_host).repeat().as_numpy_iterator())
+                    index=jax.process_index())
+              .batch(per_host)
+              .repeat()
+              .as_numpy_iterator())
 
   next_fn = partial(get_next_fully_sharded, sharded_dataset, global_data_shape,
                     global_mesh, data_axes)
@@ -656,11 +531,10 @@ def get_fully_sharded_data_pipeline(
 
 def reshard_fn(input_constraints,
                input_gda: GlobalDeviceArray) -> GlobalDeviceArray:
-  '''Infer sharding from shape. 
-  
-    We need to do this because we need some way of looking up 
+  '''Infer sharding from shape.
+    We need to do this because we need some way of looking up
     sharding for arbitrary pytrees inside pjit. Pax uses the
-    rank - this ought to be better, but it isn't perfect! 
+    rank - this ought to be better, but it isn't perfect!
     There must be a better way.
     '''
   # TODO(sholto): pax has initial reshapes to prevent unnecessary
@@ -767,9 +641,8 @@ def test_correctness(method: str):
   print(f'----------- Now testing {method} method ------------------------')
   # Initialise our desired GDA shape and device mesh layout
   batch = 32
-  # for global_data_shape to hold across each of our tree_map calls, it must be
-  # an array
-  global_data_shapes = (np.array((batch, 4)), np.array((batch, 2)))
+  # Use "P" tuple class to treat global shapes as leaves:
+  global_data_shapes = (P(batch, 4), P(batch, 2))
   data_axes = (P('data', None), P('data', None))
   # Create our device mesh - this function arranges a 4 hosts/32 devices
   # to allow us to test the general case
@@ -855,9 +728,10 @@ def test_gda_output(method: str, test_mesh_layout: np.ndarray,
 
 
 if __name__ == '__main__':
-  test_correctness('all_data_all_hosts')
-  test_correctness('per_replica')
-  test_correctness('per_host')
+  # test_correctness('all_data_all_hosts')
+  # test_correctness('per_replica')
+  # test_correctness('per_host')
   test_correctness('fully_sharded')
+
 # Note: tests which set up one host to have multiple processes
 #  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py

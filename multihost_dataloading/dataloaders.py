@@ -729,9 +729,9 @@ def test_gda_output(method: str, test_mesh_layout: np.ndarray,
 
 if __name__ == '__main__':
   # test_correctness('all_data_all_hosts')
-  # test_correctness('per_replica')
+  test_correctness('per_replica')
   # test_correctness('per_host')
-  test_correctness('fully_sharded')
+  # test_correctness('fully_sharded')
 
 # Note: tests which set up one host to have multiple processes
 #  https://source.corp.google.com/piper///depot/google3/learning/brain/research/jax/tests/tpu/multiprocess_tpu_test.py
